@@ -30,7 +30,6 @@ static bool _files, _covers, _banners;
 static unsigned _filter, _frames;
 static bool _inLibrary;
 static bool _inArtwork;
-static char _artworkAttempt[PATH_MAX];
 static bool _importingArtwork;
 static char _focusPath[PATH_MAX];
 static char _bannerRom[PATH_MAX];
@@ -539,19 +538,6 @@ static void _importArtwork(struct GUIParams* params, const char* rom) {
 static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t input, u64 buttons, bool tapped, unsigned x, unsigned y) {
 	struct SwitchArtworkState status;
 	SwitchArtworkGetState(&status);
-	if (!_pickerPhase && _artworkAttempt[0] && status.needsChoice &&
-	    !strcmp(status.rom, _artworkAttempt) && !strcmp(status.rom, rom)) {
-		_artworkAttempt[0] = 0;
-		_pickerPhase = 2;
-		_pickerIndex = 0;
-		_pickerType = 0;
-		const char* name = strrchr(rom, '/');
-		strlcpy(_pickerQuery, name ? name + 1 : rom, sizeof(_pickerQuery));
-		char* extension = strrchr(_pickerQuery, '.');
-		if (extension) *extension = 0;
-		GUIInvalidateKeys(params);
-		return true;
-	}
 	if (!_pickerPhase) return false;
 	if (_pickerPhase == 2 && status.applying) {
 		if (input & ((1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) {
@@ -602,6 +588,13 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 	}
 	if ((buttons & HidNpadButton_Y) || (tapped && _inside(x, y, 600, 104, 560, 48))) {
 		_pickerEditSearch(params);
+		return true;
+	}
+	if (_pickerPhase == 2 && ((buttons & HidNpadButton_Minus) || (tapped && _inside(x, y, 600, 158, 220, 44)))) {
+		if (!SwitchArtworkHasKey()) {
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add your SteamGridDB API key in Settings > Artwork to download artwork.");
+		} else SwitchArtworkDownloadBest(rom, _pickerQuery);
+		GUIInvalidateKeys(params);
 		return true;
 	}
 	if (_pickerPhase == 2 && ((buttons & HidNpadButton_X) || (tapped && _inside(x, y, 740, 550, 420, 44)))) {
@@ -729,7 +722,8 @@ static void _pickerDraw(struct GUIParams* params) {
 		SwitchUIPrint(params->font, 120, 256, 1016, UI_MUTED, "Search SteamGridDB for alternatives? You can preview results and cancel anytime.");
 		SwitchUIHint(params->font, 136, 612, "A", "Search SteamGridDB");
 	} else {
-		SwitchUIPrint(params->font, 120, 180, 680, UI_MUTED, status.message);
+		SwitchUIPrint(params->font, 120, 180, 460, UI_MUTED, status.message);
+		_button(params->font, 600, 158, 220, "-  Download best", false);
 		_button(params->font, 830, 158, 158, "ZL  Cover", _pickerType == 0);
 		_button(params->font, 1002, 158, 158, "ZR  Banner", _pickerType == 1);
 		size_t first = (_pickerIndex / 3) * 3;
@@ -773,6 +767,8 @@ static void _pickerDraw(struct GUIParams* params) {
 }
 
 static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMenuExitReason* result) {
+	struct SwitchArtworkState progress;
+	SwitchArtworkGetState(&progress);
 	if (!_inArtwork) {
 		SwitchArtworkSetDownloads(_covers, _banners);
 		_inArtwork = true;
@@ -787,14 +783,14 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 		return true;
 	}
 	if (input & (1U << GUI_INPUT_UP))
-		menu->index = (menu->index + 4) % 5;
+		menu->index = (menu->index + 5) % 6;
 	if (input & (1U << GUI_INPUT_DOWN))
-		menu->index = (menu->index + 1) % 5;
+		menu->index = (menu->index + 1) % 6;
 	bool activate = input & (1U << GUI_INPUT_SELECT);
 	if (input & ((1U << GUI_INPUT_LEFT) | (1U << GUI_INPUT_RIGHT))) {
 		if (menu->index == 1 || menu->index == 2)
 			menu->index = menu->index == 1 ? 2 : 1;
-		else if (menu->index >= 3)
+		else if (menu->index == 3 || menu->index == 4)
 			activate = true;
 	}
 	unsigned x, y;
@@ -811,14 +807,15 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 			menu->index = 2;
 			activate = true;
 		}
-		if (_inside(x, y, 400, 370, 808, 78)) {
+		if (_inside(x, y, 400, 350, 808, 70)) {
 			menu->index = 3;
 			activate = true;
 		}
-		if (_inside(x, y, 400, 478, 808, 78)) {
+		if (_inside(x, y, 400, 436, 808, 70)) {
 			menu->index = 4;
 			activate = true;
 		}
+		if (_inside(x, y, 408, 532, 784, 44)) { menu->index = 5; activate = true; }
 		if (_inside(x, y, 48, 664, 200, 56))
 			input |= 1U << GUI_INPUT_BACK;
 	}
@@ -852,8 +849,16 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 			_banners = !_banners;
 			_saveArtwork();
 			break;
+		case 5:
+			if (progress.bulk) SwitchArtworkCancelBulk();
+			else if (!SwitchArtworkHasKey()) {
+				GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add your SteamGridDB API key before downloading library artwork.");
+				GUIInvalidateKeys(params);
+			} else SwitchArtworkDownloadMissing(params->currentPath);
+			break;
 		}
 	}
+	SwitchArtworkGetState(&progress);
 	params->drawStart();
 	params->guiPrepare();
 	SwitchUIDrawRect(0, 0, 1280, 720, UI_BASE);
@@ -879,9 +884,9 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 	const char* descriptions[] = { "Portrait covers for the game library.",
 	                               "Background artwork for the focused game." };
 	for (unsigned i = 0; i < 2; ++i) {
-		int top = 370 + i * 108;
+		int top = 350 + i * 86;
 		if (menu->index == i + 3)
-			SwitchUIRoundRect(396, top - 8, 816, 88, 8, UI_SURFACE);
+			SwitchUIRoundRect(396, top - 8, 816, 80, 8, UI_SURFACE);
 		SwitchUIFontSize(params->font, 22);
 		SwitchUIPrint(params->font, 408, top + 24, 660, UI_TEXT, labels[i]);
 		SwitchUIFontSize(params->font, 18);
@@ -892,18 +897,27 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 		if (menu->index == i + 3)
 			SwitchUIRoundFrame(1114, top, 76, 44, 20, UI_FOCUS);
 	}
+	_button(params->font, 408, 532, 784, progress.bulk ? "Cancel library artwork downloads" :
+	        "Download all missing covers and banners", menu->index == 5);
 	char status[160];
 	SwitchArtworkStatus(status, sizeof(status));
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 408, 598, 784, UI_FOCUS, status);
-	SwitchUIPrint(params->font, 408, 630, 784, UI_MUTED, "Local and cached images are available offline.");
+	char scope[160];
+	if (progress.bulk) snprintf(scope, sizeof(scope), "%u / %u games processed — downloads continue while browsing", progress.bulkDone, progress.bulkTotal);
+	else snprintf(scope, sizeof(scope), "Scans the current library folder and subfolders. Existing images are kept.");
+	SwitchUIPrint(params->font, 408, 630, 784, UI_MUTED, scope);
 	SwitchUIDrawRect(48, 658, 1184, 1, 0xFF38332D);
 	SwitchUIHint(params->font, 48, 696, "B", "Back");
 	SwitchUIHint(params->font, 1040, 696, "A", "Select");
 	SwitchUIFontSize(params->font, 24);
-	struct SwitchArtworkState progress;
 	SwitchArtworkGetState(&progress);
-	_artworkProgress(params, &progress);
+	if (progress.busy || progress.searching || progress.bulk) {
+		unsigned percent = progress.bulk && progress.bulkTotal ? 100 * progress.bulkDone / progress.bulkTotal : progress.percent;
+		if (percent > 100) percent = 100;
+		SwitchUIRoundRect(408, 610, 784, 4, 2, UI_SURFACE);
+		if (percent) SwitchUIRoundRect(408, 610, 784 * percent / 100, 4, 2, UI_FOCUS);
+	}
 	params->guiFinish();
 	params->drawEnd();
 	*result = GUI_MENU_CONTINUE;
@@ -1163,20 +1177,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		menu->index = entries[position];
 	const struct GUIMenuItem* selected = count ? GUIMenuItemListGetConstPointer(&menu->items, menu->index) : NULL;
 	if (!_pickerPhase && selected && _game(selected) &&
-	    ((buttons & HidNpadButton_ZL) || (tapped && _inside(cx, cy, 232, 30, 214, 44)))) {
-		char rom[PATH_MAX];
-		_path(params, selected->title, rom, sizeof(rom));
-		if (!SwitchArtworkHasKey()) {
-			strlcpy(_pickerQuery, selected->title, sizeof(_pickerQuery));
-			char* extension = strrchr(_pickerQuery, '.');
-			if (extension) *extension = 0;
-			_pickerOpen(params, rom, false);
-		} else if (SwitchArtworkAttempt(rom)) {
-			strlcpy(_artworkAttempt, rom, sizeof(_artworkAttempt));
-		}
-		input = 0;
-	}
-	if (!_pickerPhase && selected && _game(selected) && (buttons & HidNpadButton_Minus)) {
+	    ((buttons & (HidNpadButton_ZL | HidNpadButton_Minus)) || (tapped && _inside(cx, cy, 232, 30, 214, 44)))) {
 		char rom[PATH_MAX];
 		_path(params, selected->title, rom, sizeof(rom));
 		strlcpy(_pickerQuery, selected->title, sizeof(_pickerQuery));
@@ -1200,10 +1201,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	if (selected)
 		_path(params, selected->title, path, sizeof(path));
 	if (strcmp(_focusPath, path)) {
-		if (strcmp(_artworkAttempt, path)) {
-			_artworkAttempt[0] = 0;
-			SwitchArtworkRequest("");
-		}
+		SwitchArtworkRequest("");
 		strlcpy(_focusPath, path, sizeof(_focusPath));
 	}
 	params->drawStart();

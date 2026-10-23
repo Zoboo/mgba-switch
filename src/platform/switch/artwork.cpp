@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -24,6 +25,11 @@ bool busy, suspended;
 Thread worker;
 bool initialized, running, covers, banners, testKey;
 bool pendingAttempt;
+bool bulk, bulkScan, bulkPartial;
+unsigned bulkDone, bulkTotal;
+std::string bulkDirectory;
+std::vector<std::string> bulkRoms;
+void cancelBulkLocked() { bulk = bulkScan = false; bulkRoms.clear(); }
 unsigned generation, activeRevision;
 struct Option { SwitchArtworkOption view; std::string url; };
 std::vector<Option> options;
@@ -236,8 +242,53 @@ bool download(const std::string& rom, bool banner, unsigned id, const std::strin
 	return false;
 }
 struct Job {
-	~Job() { mutexLock(&lock); busy = false; if (!choosePending && !importPending) applying = false; condvarWakeAll(&changed); mutexUnlock(&lock); }
+	unsigned revision;
+	bool bulkItem;
+	~Job() {
+		mutexLock(&lock);
+		busy = false;
+		if (!choosePending && !importPending && !pendingAttempt) applying = false;
+		if (bulkItem && bulk && revision == generation) {
+			++bulkDone;
+			if (bulkDone == bulkTotal) {
+				cancelBulkLocked(); finished = true;
+				status = bulkPartial ? "Partial scan complete; some folders were skipped. Try a smaller library folder." :
+				    "Missing artwork scan complete; unavailable matches were skipped";
+			}
+		}
+		condvarWakeAll(&changed); mutexUnlock(&lock);
+	}
 };
+bool currentJob(unsigned revision) {
+	mutexLock(&lock); bool result = running && revision == generation; mutexUnlock(&lock); return result;
+}
+bool scanRoms(const std::string& path, unsigned depth, unsigned revision, unsigned& visited, std::vector<std::string>& roms) {
+	if (depth > 16 || visited >= 100000 || !currentJob(revision)) return false;
+	DIR* dir = opendir(path.c_str());
+	if (!dir) return false;
+	bool complete = true;
+	while (struct dirent* entry = readdir(dir)) {
+		if (++visited > 100000 || !currentJob(revision)) { complete = false; break; }
+		if (entry->d_name[0] == '.') continue;
+		std::string child = path + (path.back() == '/' ? "" : "/") + entry->d_name;
+		if (child.size() >= 4096) { complete = false; continue; }
+		struct stat info;
+		if (lstat(child.c_str(), &info)) { complete = false; continue; }
+		if (S_ISDIR(info.st_mode)) { if (!scanRoms(child, depth + 1, revision, visited, roms)) complete = false; }
+		else if (S_ISREG(info.st_mode)) {
+			size_t dot = child.find_last_of('.');
+			if (dot == std::string::npos) continue;
+			std::string ext = child.substr(dot);
+			std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+			if (ext != ".gba" && ext != ".gb" && ext != ".gbc" && ext != ".zip" && ext != ".7z" &&
+			    ext != ".agb" && ext != ".bin" && ext != ".rom" && ext != ".mb" && ext != ".dmg" && ext != ".sgb" && ext != ".gbx") continue;
+			char image[4096];
+			if (!SwitchArtworkPath(child.c_str(), false, image, sizeof(image)) || !SwitchArtworkPath(child.c_str(), true, image, sizeof(image))) roms.push_back(child);
+		}
+	}
+	closedir(dir);
+	return complete;
+}
 void alternatives(const std::string& rom, const std::string& title, bool cover, bool banner, unsigned revision) {
 	mutexLock(&lock);
 	if (revision == generation) {
@@ -251,7 +302,7 @@ void alternatives(const std::string& rom, const std::string& title, bool cover, 
 void work(void*) {
 	while (true) {
 		mutexLock(&lock);
-		while (running && !resetPending && !importPending && discarded.empty() && (suspended || key.empty() || (!testKey && !searchPending && !choosePending && (pending.empty() || (!pendingAttempt && !covers && !banners))))) condvarWait(&changed, &lock);
+		while (running && !resetPending && !importPending && discarded.empty() && (suspended || key.empty() || (!bulk && !testKey && !searchPending && !choosePending && (pending.empty() || (!pendingAttempt && !covers && !banners))))) condvarWait(&changed, &lock);
 		std::vector<std::string> cleanup; cleanup.swap(discarded);
 		bool alive = running;
 		bool reset = resetPending, restoreBanner = resetBanner;
@@ -266,6 +317,10 @@ void work(void*) {
 		std::string rom = pending, token = key;
 		bool cover = covers, banner = banners, test = testKey;
 		bool attempt = pendingAttempt;
+		bool scan = bulk && bulkScan;
+		bool bulkItem = bulk && !scan && bulkDone < bulkRoms.size();
+		std::string scanDirectory = bulkDirectory;
+		if (bulkItem) { rom = bulkRoms[bulkDone]; cover = banner = true; }
 		pendingAttempt = false;
 		if (attempt) cover = banner = true;
 		if (cleanupOnly) rom.clear();
@@ -281,7 +336,21 @@ void work(void*) {
 		mutexUnlock(&lock);
 		for (const auto& path : cleanup) remove(path.c_str());
 		if (!alive) break;
-		Job job;
+		Job job{revision, bulkItem};
+		if (scan) {
+			std::vector<std::string> roms;
+			unsigned visited = 0;
+			bool scanned = scanRoms(scanDirectory, 0, revision, visited, roms);
+			mutexLock(&lock);
+			if (revision == generation && bulk) {
+				bulkRoms.swap(roms); bulkTotal = bulkRoms.size(); bulkScan = false; bulkPartial = !scanned;
+				status = bulkTotal ? "Downloading missing covers and banners..." :
+				    bulkPartial ? "Could not scan the entire folder. Check SD access or try a smaller folder." : "No missing artwork found";
+				if (!bulkTotal) { cancelBulkLocked(); finished = true; }
+			}
+			mutexUnlock(&lock);
+			continue;
+		}
 		if (reset) {
 			std::string target = selectionPath(restoreRom, restoreBanner);
 			bool ok = !remove((target + ".bak").c_str()) || errno == ENOENT;
@@ -334,7 +403,11 @@ void work(void*) {
 			char path[4096];
 			if (cover && SwitchArtworkPath(rom.c_str(), false, path, sizeof(path))) cover = false;
 			if (banner && SwitchArtworkPath(rom.c_str(), true, path, sizeof(path))) banner = false;
-			if (!cover && !banner) { message("Artwork ready"); continue; }
+			if (!cover && !banner) {
+				message("Artwork ready");
+				mutexLock(&lock); if (revision == generation) finished = true; mutexUnlock(&lock);
+				continue;
+			}
 		}
 		if (choose) {
 			std::string bytes;
@@ -353,7 +426,7 @@ void work(void*) {
 		message("Contacting SteamGridDB...");
 		CURL* curl = curl_easy_init();
 		if (!curl) { message("Network unavailable"); mutexLock(&lock); if (revision == generation) { searching = false; finished = true; } mutexUnlock(&lock); continue; }
-		std::string title = cleanTitle(test ? "Metroid" : search && !query.empty() ? query : base(rom));
+		std::string title = cleanTitle(test ? "Metroid" : (search || attempt) && !query.empty() ? query : base(rom));
 		size_t suffix = title.find_first_of("([");
 		if (!search && suffix != std::string::npos) title.resize(suffix);
 		char* encoded = curl_easy_escape(curl, title.c_str(), title.size());
@@ -446,6 +519,7 @@ void work(void*) {
 		if (cover) complete = download(rom, false, id, token, revision);
 		if (banner) complete = download(rom, true, id, token, revision) && complete;
 		message(complete ? "Artwork ready" : "Artwork unavailable or download failed");
+		mutexLock(&lock); if (revision == generation) finished = true; mutexUnlock(&lock);
 		if (!complete && attempt) {
 			char path[4096];
 			bool missingCover = cover && !SwitchArtworkPath(rom.c_str(), false, path, sizeof(path));
@@ -464,6 +538,7 @@ void SwitchArtworkGetState(SwitchArtworkState* state) {
 	state->resetId = resetSerial;
 	state->resetDone = resetCompleted;
 	state->resetSucceeded = resetSucceeded;
+	state->bulk = bulk; state->bulkDone = bulkDone; state->bulkTotal = bulkTotal;
 	state->busy = busy; state->needsChoice = needsChoice; state->searching = searching; state->finished = finished; state->percent = percent; state->revision = imageRevision; state->count = options.size(); snprintf(state->rom, sizeof(state->rom), "%s", choiceRom.empty() ? requested.c_str() : choiceRom.c_str()); snprintf(state->message, sizeof(state->message), "%s", status.c_str()); mutexUnlock(&lock);
 }
 bool SwitchArtworkGetOption(size_t index, SwitchArtworkOption* option) {
@@ -479,7 +554,7 @@ bool SwitchArtworkOpen(const char* rom, bool banner) {
 	finished = false;
 	pending.clear();
 	discardOptions();
-	importPending = false; if (!busy) applying = false; ++generation;
+	importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation;
 	condvarWakeAll(&changed);
 	mutexUnlock(&lock);
 	return true;
@@ -492,7 +567,7 @@ bool SwitchArtworkImport(const char* rom, const char* path, bool banner) {
 	importPending = applying = true; finished = false; percent = 0;
 	searchPending = choosePending = searching = needsChoice = testKey = false; pending.clear();
 	status = banner ? "Importing banner..." : "Importing cover...";
-	++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
+	cancelBulkLocked(); ++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
 	return true;
 }
 bool SwitchArtworkReset(const char* rom, bool banner) {
@@ -509,7 +584,7 @@ bool SwitchArtworkReset(const char* rom, bool banner) {
 	status = banner ? "Restoring original banner..." : "Restoring original cover...";
 	pending.clear();
 	discardOptions();
-	importPending = false; if (!busy) applying = false; ++generation;
+	importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation;
 	condvarWakeAll(&changed);
 	mutexUnlock(&lock);
 	return true;
@@ -526,7 +601,7 @@ void SwitchArtworkSearch(const char* title) {
 		status = "Searching SteamGridDB...";
 		discardOptions();
 		pending.clear();
-		importPending = false; if (!busy) applying = false; ++generation;
+		importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation;
 		condvarWakeAll(&changed);
 	} else if (key.empty()) {
 		finished = true;
@@ -535,10 +610,10 @@ void SwitchArtworkSearch(const char* title) {
 	mutexUnlock(&lock);
 }
 void SwitchArtworkChoose(size_t index) {
-	if (!initialized) return; mutexLock(&lock); if (!applying && !importPending && !choosePending && index < options.size()) { applying = true; chosen = index; choosePending = true; searchPending = searching = needsChoice = false; finished = false; importPending = false; ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
+	if (!initialized) return; mutexLock(&lock); if (!applying && !importPending && !choosePending && index < options.size()) { applying = true; chosen = index; choosePending = true; searchPending = searching = needsChoice = false; finished = false; importPending = false; cancelBulkLocked(); ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
 }
 void SwitchArtworkCancelChoice(void) {
-	if (!initialized) return; mutexLock(&lock); importPending = false; if (!busy) applying = false; ++generation; searchPending = choosePending = searching = needsChoice = false; finished = true; discardOptions(); pending.clear(); status = "Artwork selection cancelled"; condvarWakeAll(&changed); mutexUnlock(&lock);
+	if (!initialized) return; mutexLock(&lock); importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation; searchPending = choosePending = searching = needsChoice = false; finished = true; discardOptions(); pending.clear(); status = "Artwork selection cancelled"; condvarWakeAll(&changed); mutexUnlock(&lock);
 }
 void SwitchArtworkInit(const char* path) {
 	if (initialized || !path || !*path) return;
@@ -558,13 +633,13 @@ void SwitchArtworkInit(const char* path) {
 }
 void SwitchArtworkSuspend(void) {
 	if (!initialized) return;
-	mutexLock(&lock); suspended = true; pending.clear(); testKey = false; requested.clear(); importPending = false; if (!busy) applying = false; ++generation;
+	mutexLock(&lock); suspended = true; pending.clear(); testKey = false; requested.clear(); importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation;
 	searchPending = choosePending = needsChoice = searching = false; discardOptions();
 	mutexUnlock(&lock);
 }
 void SwitchArtworkDeinit(void) {
 	if (!initialized) return;
-	mutexLock(&lock); running = false; discardOptions(); importPending = false; if (!busy) applying = false; ++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
+	mutexLock(&lock); running = false; discardOptions(); importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
 	threadWaitForExit(&worker); threadClose(&worker);
 	curl_global_cleanup(); key.clear(); initialized = false;
 }
@@ -580,14 +655,14 @@ bool SwitchArtworkSetKey(const char* value) {
 		if (!ok || rename(temporary.c_str(), destination.c_str())) { remove(temporary.c_str()); return false; }
 		chmod(destination.c_str(), 0600);
 	} else if (exists(destination) && remove(destination.c_str())) return false;
-	mutexLock(&lock); key = value; requested.clear(); pending.clear(); needsChoice = searching = searchPending = choosePending = false; discardOptions(); importPending = false; if (!busy) applying = false; ++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
+	mutexLock(&lock); key = value; requested.clear(); pending.clear(); needsChoice = searching = searchPending = choosePending = false; discardOptions(); importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
 	return true;
 }
 bool SwitchArtworkHasKey(void) { if (!initialized) return false; mutexLock(&lock); bool result = !key.empty(); mutexUnlock(&lock); return result; }
 void SwitchArtworkSetDownloads(bool cover, bool banner) {
 	if (!initialized) return;
 	mutexLock(&lock);
-	if (covers != cover || banners != banner) { importPending = false; if (!busy) applying = false; ++generation; searchPending = choosePending = needsChoice = searching = false; discardOptions(); }
+	if (covers != cover || banners != banner) { importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation; searchPending = choosePending = needsChoice = searching = false; discardOptions(); }
 	covers = cover; banners = banner; requested.clear(); suspended = false;
 	status = cover || banner ? "Artwork ready" : "Artwork downloads disabled";
 	condvarWakeAll(&changed);
@@ -596,19 +671,45 @@ void SwitchArtworkSetDownloads(bool cover, bool banner) {
 }
 void SwitchArtworkRequest(const char* rom) {
 	if (!initialized || !rom) return;
-	mutexLock(&lock); if (requested != rom) { requested = rom; pending = rom; choiceRom.clear(); pendingAttempt = false; needsChoice = searching = finished = searchPending = choosePending = false; discardOptions(); importPending = false; if (!busy) applying = false; ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
+	mutexLock(&lock); if (!bulk && requested != rom) { requested = rom; pending = rom; choiceRom.clear(); pendingAttempt = false; needsChoice = searching = finished = searchPending = choosePending = false; discardOptions(); importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
 }
 bool SwitchArtworkAttempt(const char* rom) {
+	return SwitchArtworkDownloadBest(rom, nullptr);
+}
+bool SwitchArtworkDownloadBest(const char* rom, const char* title) {
 	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
+	if (title && strlen(title) > 512) return false;
 	mutexLock(&lock);
 	if (key.empty()) { status = "Add a SteamGridDB API key in Settings > Artwork to download."; mutexUnlock(&lock); return false; }
-	requested = pending = rom; choiceRom.clear();
+	if (choiceRom != rom) discardOptions();
+	requested = pending = choiceRom = rom;
+	searchTitle = title ? title : "";
 	pendingAttempt = true; suspended = false;
 	needsChoice = searching = finished = searchPending = choosePending = testKey = false;
 	percent = 0; status = "Looking for artwork...";
-	discardOptions(); importPending = false; if (!busy) applying = false; ++generation; condvarWakeAll(&changed);
+	importPending = false; applying = true; cancelBulkLocked(); ++generation; condvarWakeAll(&changed);
 	mutexUnlock(&lock);
 	return true;
+}
+bool SwitchArtworkDownloadMissing(const char* path) {
+	if (!initialized || !path || !*path || strlen(path) >= 4096) return false;
+	mutexLock(&lock);
+	if (key.empty()) { status = "Add a SteamGridDB API key in Settings > Artwork to download."; mutexUnlock(&lock); return false; }
+	cancelBulkLocked(); ++generation;
+	bulk = bulkScan = true; bulkDone = bulkTotal = 0; bulkDirectory = path;
+	bulkPartial = false;
+	pending.clear(); pendingAttempt = testKey = suspended = false;
+	searchPending = choosePending = searching = needsChoice = importPending = false;
+	if (!busy) applying = false;
+	finished = false; percent = 0; discardOptions();
+	status = "Scanning library for missing artwork...";
+	condvarWakeAll(&changed); mutexUnlock(&lock); return true;
+}
+void SwitchArtworkCancelBulk(void) {
+	if (!initialized) return;
+	mutexLock(&lock);
+	if (bulk) { cancelBulkLocked(); ++generation; finished = true; status = "Missing artwork download cancelled"; condvarWakeAll(&changed); }
+	mutexUnlock(&lock);
 }
 bool SwitchArtworkPath(const char* rom, bool banner, char* out, size_t size) {
 	if (!rom || !out || !size) return false;
@@ -626,6 +727,6 @@ bool SwitchArtworkPath(const char* rom, bool banner, char* out, size_t size) {
 	if (!exists(path) || path.size() >= size) { out[0] = 0; return false; }
 	memcpy(out, path.c_str(), path.size() + 1); return true;
 }
-void SwitchArtworkTest(void) { if (!initialized) return; mutexLock(&lock); if (key.empty()) { status = "Enter an API key first"; mutexUnlock(&lock); return; } testKey = true; importPending = false; if (!busy) applying = false; ++generation; condvarWakeAll(&changed); mutexUnlock(&lock); }
+void SwitchArtworkTest(void) { if (!initialized) return; mutexLock(&lock); if (key.empty()) { status = "Enter an API key first"; mutexUnlock(&lock); return; } testKey = true; importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation; condvarWakeAll(&changed); mutexUnlock(&lock); }
 void SwitchArtworkStatus(char* out, size_t size) { if (!out || !size) return; if (!initialized) { snprintf(out, size, "Artwork service unavailable"); return; } mutexLock(&lock); snprintf(out, size, "%s", status.c_str()); mutexUnlock(&lock); }
 }
