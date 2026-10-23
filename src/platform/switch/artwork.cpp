@@ -21,6 +21,7 @@ CondVar changed;
 bool busy, suspended;
 Thread worker;
 bool initialized, running, covers, banners, testKey;
+bool pendingAttempt;
 unsigned generation, activeRevision;
 struct Option { SwitchArtworkOption view; std::string url; };
 std::vector<Option> options;
@@ -186,10 +187,20 @@ bool download(const std::string& rom, bool banner, unsigned id, const std::strin
 struct Job {
 	~Job() { mutexLock(&lock); busy = false; condvarWakeAll(&changed); mutexUnlock(&lock); }
 };
+void alternatives(const std::string& rom, const std::string& title, bool cover, bool banner, unsigned revision) {
+	mutexLock(&lock);
+	if (revision == generation) {
+		choiceRom = rom; choiceCovers = cover; choiceBanners = banner;
+		searchTitle = title; searchPending = searching = needsChoice = true;
+		finished = false; status = "Searching closest artwork matches...";
+		condvarWakeAll(&changed);
+	}
+	mutexUnlock(&lock);
+}
 void work(void*) {
 	while (true) {
 		mutexLock(&lock);
-		while (running && !resetPending && discarded.empty() && (suspended || key.empty() || (!testKey && !searchPending && !choosePending && (pending.empty() || (!covers && !banners))))) condvarWait(&changed, &lock);
+		while (running && !resetPending && discarded.empty() && (suspended || key.empty() || (!testKey && !searchPending && !choosePending && (pending.empty() || (!pendingAttempt && !covers && !banners))))) condvarWait(&changed, &lock);
 		std::vector<std::string> cleanup; cleanup.swap(discarded);
 		bool alive = running;
 		bool reset = resetPending, restoreBanner = resetBanner;
@@ -200,6 +211,9 @@ void work(void*) {
 		busy = alive;
 		std::string rom = pending, token = key;
 		bool cover = covers, banner = banners, test = testKey;
+		bool attempt = pendingAttempt;
+		pendingAttempt = false;
+		if (attempt) cover = true;
 		if (cleanupOnly) rom.clear();
 		bool search = searchPending, choose = choosePending;
 		std::string query = searchTitle;
@@ -263,6 +277,25 @@ void work(void*) {
 		if (!json(route, token, revision, document)) { message("SteamGridDB request failed; check key or network"); mutexLock(&lock); if (revision == generation) { searching = false; finished = true; } mutexUnlock(&lock); continue; }
 		if (test) { message("SteamGridDB connection successful"); continue; }
 		if (search) {
+			std::string shorter = title;
+			for (unsigned retry = 0; document["data"].Empty() && retry < 3; ++retry) {
+				size_t split = shorter.find_last_of(" :_-.");
+				if (split == std::string::npos || split < 4) {
+					if (shorter.size() <= 4) break;
+					split = std::max(size_t(4), (shorter.size() + 4) / 2);
+					while (split && (static_cast<unsigned char>(shorter[split]) & 0xC0) == 0x80) --split;
+					if (split < 4) break;
+				}
+				shorter.resize(split);
+				CURL* escape = curl_easy_init();
+				if (!escape) break;
+				char* value = curl_easy_escape(escape, shorter.c_str(), shorter.size());
+				std::string fallback = "search/autocomplete/" + std::string(value ? value : "");
+				curl_free(value); curl_easy_cleanup(escape);
+				rapidjson::Document matches;
+				if (!json(fallback, token, revision, matches)) break;
+				document.Swap(matches);
+			}
 			struct Game { unsigned id; std::string title; unsigned score; };
 			std::vector<Game> games;
 			std::string needle = normalized(title);
@@ -309,17 +342,18 @@ void work(void*) {
 			if (item.IsObject() && item.HasMember("id") && item["id"].IsUint() && item.HasMember("name") && item["name"].IsString() && normalized(item["name"].GetString()) == normalized(title)) { unsigned match = item["id"].GetUint(); if (id && id != match) ambiguous = true; id = match; }
 		}
 		if (ambiguous || !id) {
-			mutexLock(&lock); if (revision == generation) { needsChoice = true; choiceRom = rom; choiceCovers = cover; choiceBanners = banner; status = "No exact match. Search alternatives?"; } mutexUnlock(&lock); continue;
+			if (attempt) alternatives(rom, title, cover, banner, revision);
+			continue;
 		}
 		bool complete = true; unavailable = false;
 		if (cover) complete = download(rom, false, id, token, revision);
 		if (banner) complete = download(rom, true, id, token, revision) && complete;
 		message(complete ? "Artwork ready" : "Artwork unavailable or download failed");
-		if (!complete && unavailable) {
+		if (!complete && attempt) {
 			char path[4096];
 			bool missingCover = cover && !SwitchArtworkPath(rom.c_str(), false, path, sizeof(path));
 			bool missingBanner = banner && !SwitchArtworkPath(rom.c_str(), true, path, sizeof(path));
-			mutexLock(&lock); if (revision == generation && (missingCover || missingBanner)) { needsChoice = true; choiceRom = rom; choiceCovers = missingCover; choiceBanners = missingBanner; } mutexUnlock(&lock);
+			if (missingCover || missingBanner) alternatives(rom, title, missingCover, missingBanner, revision);
 		}
 	}
 }
@@ -453,7 +487,19 @@ void SwitchArtworkSetDownloads(bool cover, bool banner) {
 }
 void SwitchArtworkRequest(const char* rom) {
 	if (!initialized || !rom) return;
-	mutexLock(&lock); if (requested != rom) { requested = rom; pending = rom; choiceRom.clear(); needsChoice = searching = finished = searchPending = choosePending = false; discardOptions(); ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
+	mutexLock(&lock); if (requested != rom) { requested = rom; pending = rom; choiceRom.clear(); pendingAttempt = false; needsChoice = searching = finished = searchPending = choosePending = false; discardOptions(); ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
+}
+bool SwitchArtworkAttempt(const char* rom) {
+	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
+	mutexLock(&lock);
+	if (key.empty()) { status = "Add a SteamGridDB API key in Settings > Artwork to download."; mutexUnlock(&lock); return false; }
+	requested = pending = rom; choiceRom.clear();
+	pendingAttempt = true; suspended = false;
+	needsChoice = searching = finished = searchPending = choosePending = testKey = false;
+	percent = 0; status = "Looking for artwork...";
+	discardOptions(); ++generation; condvarWakeAll(&changed);
+	mutexUnlock(&lock);
+	return true;
 }
 bool SwitchArtworkPath(const char* rom, bool banner, char* out, size_t size) {
 	if (!rom || !out || !size) return false;

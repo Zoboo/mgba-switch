@@ -28,8 +28,8 @@ static bool _files, _covers, _banners;
 static unsigned _filter, _frames;
 static bool _inLibrary;
 static bool _inArtwork;
+static char _artworkAttempt[PATH_MAX];
 static char _focusPath[PATH_MAX];
-static unsigned _focusSince;
 static char _bannerRom[PATH_MAX];
 static float _bannerOpacity;
 static struct GUIMenu _artworkMenu;
@@ -504,16 +504,18 @@ static void _pickerOpen(struct GUIParams* params, const char* rom, bool banner) 
 static void _artworkAction(struct GUIParams* params, bool available) {
 	if (!available) return;
 	SwitchUIRoundRect(232, 30, 214, 44, 8, UI_SURFACE);
-	SwitchUIHint(params->font, 244, 60, "-", "Artwork");
+	SwitchUIHint(params->font, 244, 60, "ZL", "Artwork");
 }
 
 static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t input, u64 buttons, bool tapped, unsigned x, unsigned y) {
 	struct SwitchArtworkState status;
 	SwitchArtworkGetState(&status);
-	if (!_pickerPhase && status.needsChoice && !strcmp(status.rom, rom)) {
-		_pickerPhase = 1;
+	if (!_pickerPhase && _artworkAttempt[0] && status.needsChoice &&
+	    !strcmp(status.rom, _artworkAttempt) && !strcmp(status.rom, rom)) {
+		_artworkAttempt[0] = 0;
+		_pickerPhase = 2;
 		_pickerIndex = 0;
-		_pickerType = -1;
+		_pickerType = 0;
 		const char* name = strrchr(rom, '/');
 		strlcpy(_pickerQuery, name ? name + 1 : rom, sizeof(_pickerQuery));
 		char* extension = strrchr(_pickerQuery, '.');
@@ -1119,7 +1121,19 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		menu->index = entries[position];
 	const struct GUIMenuItem* selected = count ? GUIMenuItemListGetConstPointer(&menu->items, menu->index) : NULL;
 	if (!_pickerPhase && selected && _game(selected) &&
-	    ((buttons & HidNpadButton_Minus) || (tapped && _inside(cx, cy, 232, 30, 214, 44)))) {
+	    ((buttons & HidNpadButton_ZL) || (tapped && _inside(cx, cy, 232, 30, 214, 44)))) {
+		char rom[PATH_MAX];
+		_path(params, selected->title, rom, sizeof(rom));
+		if (!SwitchArtworkHasKey()) {
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0,
+			    "Add your SteamGridDB API key in Settings > Artwork before downloading artwork.");
+			GUIInvalidateKeys(params);
+		} else if (SwitchArtworkAttempt(rom)) {
+			strlcpy(_artworkAttempt, rom, sizeof(_artworkAttempt));
+		}
+		input = 0;
+	}
+	if (!_pickerPhase && selected && _game(selected) && (buttons & HidNpadButton_Minus)) {
 		char rom[PATH_MAX];
 		_path(params, selected->title, rom, sizeof(rom));
 		strlcpy(_pickerQuery, selected->title, sizeof(_pickerQuery));
@@ -1143,12 +1157,12 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	if (selected)
 		_path(params, selected->title, path, sizeof(path));
 	if (strcmp(_focusPath, path)) {
+		if (strcmp(_artworkAttempt, path)) {
+			_artworkAttempt[0] = 0;
+			SwitchArtworkRequest("");
+		}
 		strlcpy(_focusPath, path, sizeof(_focusPath));
-		_focusSince = _frames;
-		SwitchArtworkRequest("");
 	}
-	if (!_pickerPhase && selected && _frames - _focusSince >= 18 && _game(selected))
-		SwitchArtworkRequest(path);
 	params->drawStart();
 	params->guiPrepare();
 	++_frames;

@@ -24,6 +24,7 @@ bool SwitchArtworkSetKey(const char* key);
 bool SwitchArtworkHasKey(void);
 void SwitchArtworkSetDownloads(bool covers, bool banners);
 void SwitchArtworkRequest(const char* romPath);
+bool SwitchArtworkAttempt(const char* romPath);
 bool SwitchArtworkPath(const char* romPath, bool banner, char* out, size_t size);
 void SwitchArtworkTest(void);
 void SwitchArtworkStatus(char* out, size_t size);

@@ -20,7 +20,7 @@ list(APPEND GUI_SRC ${CMAKE_CURRENT_SOURCE_DIR}/gui-font.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-achievements.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-updates.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/switch-updater.cpp)
-set(SWITCH_UPDATE_VERSION "1.0.0" CACHE STRING "Switch frontend release version")
+set(SWITCH_UPDATE_VERSION "1.0.1" CACHE STRING "Switch frontend release version")
 find_library(SWITCH_CURL_LIBRARY curl REQUIRED)
 find_package(Freetype REQUIRED)
 find_library(SWITCH_HARFBUZZ_LIBRARY harfbuzz REQUIRED)
@@ -96,9 +96,9 @@ add_custom_command(OUTPUT romfs.bin
                DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/SourceSans3-LICENSE.txt" "${switch_rcheevos_SOURCE_DIR}/LICENSE" "${PROJECT_SOURCE_DIR}/res/font-new.png" "${PROJECT_SOURCE_DIR}/res/scripts/demos/SourceSans3-Regular.otf" "${CMAKE_CURRENT_SOURCE_DIR}/fileassoc.cfg.in")
 
 add_custom_target(${BINARY_NAME}.nro ALL
-                  ${ELF2NRO} ${BINARY_NAME}.elf ${BINARY_NAME}.nro --romfs=romfs.bin --nacp=control.nacp "--icon=${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg"
+                  ${ELF2NRO} ${BINARY_NAME}.elf "${PROJECT_SOURCE_DIR}/${BINARY_NAME}.nro" --romfs=romfs.bin --nacp=control.nacp "--icon=${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg"
                   DEPENDS ${BINARY_NAME}.elf control.nacp ${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg romfs.bin
                   VERBATIM)
 
 install(TARGETS ${BINARY_NAME}.elf DESTINATION . COMPONENT ${BINARY_NAME}-dbg)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/${BINARY_NAME}.nro DESTINATION . COMPONENT ${BINARY_NAME}-switch)
+install(FILES ${PROJECT_SOURCE_DIR}/${BINARY_NAME}.nro DESTINATION . COMPONENT ${BINARY_NAME}-switch)
