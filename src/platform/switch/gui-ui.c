@@ -6,6 +6,7 @@
 #include "gui-images.h"
 #include "feature/gui/gui-runner.h"
 #include <mgba-util/gui/font.h>
+#include <mgba-util/gui/file-select.h>
 #include <mgba-util/image.h>
 #include <mgba-util/string.h>
 #include <mgba-util/vfs.h>
@@ -13,6 +14,7 @@
 #include <GLES3/gl3.h>
 #include <switch.h>
 #include <sys/stat.h>
+#include <strings.h>
 
 #define UI_TEXT 0xFFF5F3EF
 #define UI_MUTED 0xFFB8B2AA
@@ -29,6 +31,7 @@ static unsigned _filter, _frames;
 static bool _inLibrary;
 static bool _inArtwork;
 static char _artworkAttempt[PATH_MAX];
+static bool _importingArtwork;
 static char _focusPath[PATH_MAX];
 static char _bannerRom[PATH_MAX];
 static float _bannerOpacity;
@@ -507,6 +510,32 @@ static void _artworkAction(struct GUIParams* params, bool available) {
 	SwitchUIHint(params->font, 244, 60, "ZL", "Artwork");
 }
 
+static bool _pngFile(const char* name) {
+	const char* extension = strrchr(name, '.');
+	return extension && !strcasecmp(extension, ".png");
+}
+
+static void _importArtwork(struct GUIParams* params, const char* rom) {
+	char currentPath[PATH_MAX], selected[PATH_MAX], game[PATH_MAX];
+	strlcpy(currentPath, params->currentPath, sizeof(currentPath));
+	strlcpy(game, rom, sizeof(game));
+	const char* basePath = params->basePath;
+	size_t fileIndex = params->fileIndex;
+	params->basePath = "sdmc:/";
+	strlcpy(params->currentPath, "sdmc:/", sizeof(params->currentPath));
+	params->fileIndex = 0;
+	_importingArtwork = true;
+	GUIInvalidateKeys(params);
+	bool accepted = GUISelectFile(params, selected, sizeof(selected), _pngFile, NULL, NULL);
+	_importingArtwork = false;
+	params->basePath = basePath;
+	params->fileIndex = fileIndex;
+	strlcpy(params->currentPath, currentPath, sizeof(params->currentPath));
+	if (accepted && !SwitchArtworkImport(game, selected, _pickerType == 1))
+		GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not start image import. Please try again.");
+	GUIInvalidateKeys(params);
+}
+
 static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t input, u64 buttons, bool tapped, unsigned x, unsigned y) {
 	struct SwitchArtworkState status;
 	SwitchArtworkGetState(&status);
@@ -524,6 +553,14 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 		return true;
 	}
 	if (!_pickerPhase) return false;
+	if (_pickerPhase == 2 && status.applying) {
+		if (input & ((1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) {
+			SwitchArtworkCancelChoice();
+			_pickerPhase = 0;
+			GUIInvalidateKeys(params);
+		}
+		return true;
+	}
 	if (_pickerPhase >= 3) {
 		bool back = (input & ((1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) ||
 		    (tapped && _inside(x, y, 840, 550, 320, 64));
@@ -567,6 +604,10 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 		_pickerEditSearch(params);
 		return true;
 	}
+	if (_pickerPhase == 2 && ((buttons & HidNpadButton_X) || (tapped && _inside(x, y, 740, 550, 420, 44)))) {
+		_importArtwork(params, rom);
+		return true;
+	}
 	if (_pickerPhase == 2) {
 		if ((buttons & HidNpadButton_ZL) || (tapped && _inside(x, y, 830, 158, 158, 44))) {
 			_pickerOpen(params, rom, false);
@@ -605,7 +646,6 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 		if (tapped && _inside(x, y, 120, 600, 650, 34)) choose = true;
 		if (choose) {
 			SwitchArtworkChoose(_pickerIndex);
-			_pickerPhase = 0;
 			GUIInvalidateKeys(params);
 		}
 	}
@@ -725,6 +765,7 @@ static void _pickerDraw(struct GUIParams* params) {
 		}
 		_button(params->font, 120, 550, 280, "L  Reset cover", false);
 		_button(params->font, 420, 550, 300, "R  Reset banner", false);
+		_button(params->font, 740, 550, 420, "X  Import PNG from SD", false);
 	}
 	SwitchUIHint(params->font, 868, 612, "B", "Cancel");
 	SwitchUIFontSize(params->font, 24);
@@ -922,6 +963,7 @@ static void _libraryFooter(struct GUIParams* params, bool files, const char* act
 
 bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct GUIMenuState* state,
                          enum GUIMenuExitReason* result) {
+	if (_importingArtwork) return false;
 	if (menu == SwitchUIAchievementsMenu()) return SwitchUIAchievementsRun(params, result);
 	if (menu == SwitchUIUpdatesMenu()) return SwitchUIUpdatesRun(params, result);
 	if (menu == &_interfaceMenu) {
@@ -1125,9 +1167,10 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		char rom[PATH_MAX];
 		_path(params, selected->title, rom, sizeof(rom));
 		if (!SwitchArtworkHasKey()) {
-			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0,
-			    "Add your SteamGridDB API key in Settings > Artwork before downloading artwork.");
-			GUIInvalidateKeys(params);
+			strlcpy(_pickerQuery, selected->title, sizeof(_pickerQuery));
+			char* extension = strrchr(_pickerQuery, '.');
+			if (extension) *extension = 0;
+			_pickerOpen(params, rom, false);
 		} else if (SwitchArtworkAttempt(rom)) {
 			strlcpy(_artworkAttempt, rom, sizeof(_artworkAttempt));
 		}

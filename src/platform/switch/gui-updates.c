@@ -11,7 +11,7 @@
 static struct mGUIRunner* _runner;
 static struct GUIMenu _menu;
 static char _executable[PATH_MAX], _promptedVersion[32];
-static bool _restart, _restartAttempted;
+static bool _restart, _restartPrompted;
 
 void SwitchUIUpdatesInit(struct mGUIRunner* runner) {
 	_runner = runner;
@@ -33,7 +33,20 @@ void SwitchUIUpdatesDeinit(void) {
 struct GUIMenu* SwitchUIUpdatesMenu(void) { return &_menu; }
 bool SwitchUIUpdatesShouldExit(void) { return _restart; }
 
-static void _install(struct GUIParams* params, const struct SwitchUpdaterState* state) {
+static void _confirmRestart(struct GUIParams* params) {
+	_restartPrompted = true;
+	if (GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
+	    "Update installed successfully.\nRestart the application now?\nA: Restart    B: Later") == GUI_MENU_EXIT_ACCEPT) {
+		char arguments[PATH_MAX + 3];
+		snprintf(arguments, sizeof(arguments), "\"%s\"", _executable);
+		if (R_SUCCEEDED(envSetNextLoad(_executable, arguments))) _restart = true;
+		else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0,
+		    "Automatic restart is unavailable. Reopen the application from the homebrew menu.");
+	}
+	GUIInvalidateKeys(params);
+}
+
+static void _install(struct GUIParams* params, const struct SwitchUpdaterState* state, bool showProgress) {
 	if (!_runner || _runner->core) return;
 	if (!state->canInstall) {
 		GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0,
@@ -42,29 +55,27 @@ static void _install(struct GUIParams* params, const struct SwitchUpdaterState* 
 		return;
 	}
 	if (GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
-	    "Install version %s?\nThe application will download the update and restart.\nA: Update    B: Later", state->version) == GUI_MENU_EXIT_ACCEPT)
+	    "Install version %s?\nYou will be asked to restart after the download finishes.\nA: Download    B: Later", state->version) == GUI_MENU_EXIT_ACCEPT) {
+		_restartPrompted = false;
 		SwitchUpdaterInstall();
+		if (showProgress) {
+			struct GUIMenuItem* ignored = NULL;
+			GUIShowMenu(params, &_menu, &ignored);
+		}
+	}
 	GUIInvalidateKeys(params);
 }
 
 void SwitchUIUpdatesPoll(struct GUIParams* params, bool prompt) {
 	struct SwitchUpdaterState state;
 	SwitchUpdaterGetState(&state);
-	if (_runner && !_runner->core && state.phase == SWITCH_UPDATE_READY && !_restartAttempted) {
-		_restartAttempted = true;
-		char arguments[PATH_MAX + 3];
-		snprintf(arguments, sizeof(arguments), "\"%s\"", _executable);
-		if (R_SUCCEEDED(envSetNextLoad(_executable, arguments))) _restart = true;
-		else {
-			strlcpy(_promptedVersion, state.version, sizeof(_promptedVersion));
-			if (prompt) GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0,
-			    "Update installed. Automatic restart is unavailable; reopen the application from the homebrew menu.");
-		}
+	if (_runner && !_runner->core && state.phase == SWITCH_UPDATE_READY && !_restartPrompted) {
+		_confirmRestart(params);
 	}
 	if (prompt && _runner && !_runner->core && state.canInstall && state.phase == SWITCH_UPDATE_AVAILABLE &&
 	    strcmp(state.version, _promptedVersion)) {
 		strlcpy(_promptedVersion, state.version, sizeof(_promptedVersion));
-		_install(params, &state);
+		_install(params, &state, true);
 	}
 }
 
@@ -84,7 +95,8 @@ bool SwitchUIUpdatesRun(struct GUIParams* params, enum GUIMenuExitReason* result
 	}
 	bool busy = state.phase == SWITCH_UPDATE_CHECKING || state.phase == SWITCH_UPDATE_DOWNLOADING;
 	if (!busy && ((input & (1U << GUI_INPUT_SELECT)) || (tap && x >= 408 && x < 1192 && y >= 270 && y < 326))) {
-		if (state.phase == SWITCH_UPDATE_AVAILABLE) _install(params, &state);
+		if (state.phase == SWITCH_UPDATE_AVAILABLE) _install(params, &state, false);
+		else if (state.phase == SWITCH_UPDATE_READY && !_runner->core) _confirmRestart(params);
 		else if (state.phase != SWITCH_UPDATE_READY) { _promptedVersion[0] = 0; SwitchUpdaterCheck(); }
 	}
 	params->drawStart();
@@ -104,11 +116,14 @@ bool SwitchUIUpdatesRun(struct GUIParams* params, enum GUIMenuExitReason* result
 	SwitchUIRoundRect(408, 270, 784, 56, 8, 0xFF332024);
 	SwitchUIRoundFrame(408, 270, 784, 56, 8, 0xFFFFA3BD);
 	SwitchUIPrint(params->font, 426, 305, 748, 0xFFF5F3EF, busy ? "Working in the background..." :
-	    state.phase == SWITCH_UPDATE_READY ? "Update installed; reopen from the homebrew menu if needed" :
-	    state.phase == SWITCH_UPDATE_AVAILABLE ? (_runner->core ? "Return to the library to install this update" : "Download update and restart") : "Check for updates");
+	    state.phase == SWITCH_UPDATE_READY ? (_runner->core ? "Return to the library to restart" : "Update installed — restart now") :
+	    state.phase == SWITCH_UPDATE_AVAILABLE ? (_runner->core ? "Return to the library to install this update" : "Download update") : "Check for updates");
 	if (state.phase == SWITCH_UPDATE_DOWNLOADING) {
 		SwitchUIRoundRect(408, 364, 784, 12, 6, 0xFF332024);
 		if (state.progress) SwitchUIRoundRect(408, 364, 784 * state.progress / 100, 12, 6, 0xFFFFA3BD);
+		char progress[64];
+		snprintf(progress, sizeof(progress), "%u%% downloaded", state.progress);
+		SwitchUIPrint(params->font, 408, 410, 784, 0xFFFFA3BD, progress);
 	}
 	SwitchUIPrint(params->font, 408, 436, 784, 0xFFB8B2AA, "Updates preserve settings, artwork, saves, and achievements.");
 	SwitchUIHint(params->font, 48, 696, "B", "Back");

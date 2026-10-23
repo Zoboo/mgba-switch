@@ -8,12 +8,13 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-struct SwitchArtworkState { bool busy, needsChoice, searching, finished, resetSucceeded; unsigned percent, revision, resetId, resetDone; size_t count; char rom[4096], message[192]; };
+struct SwitchArtworkState { bool applying, busy, needsChoice, searching, finished, resetSucceeded; unsigned percent, revision, resetId, resetDone; size_t count; char rom[4096], message[192]; };
 struct SwitchArtworkOption { unsigned id; bool banner; char title[192], preview[4096]; };
 void SwitchArtworkGetState(struct SwitchArtworkState* state);
 bool SwitchArtworkGetOption(size_t index, struct SwitchArtworkOption* option);
 void SwitchArtworkSearch(const char* title);
 bool SwitchArtworkOpen(const char* romPath, bool banner);
+bool SwitchArtworkImport(const char* romPath, const char* imagePath, bool banner);
 bool SwitchArtworkReset(const char* romPath, bool banner);
 void SwitchArtworkChoose(size_t index);
 void SwitchArtworkCancelChoice(void);

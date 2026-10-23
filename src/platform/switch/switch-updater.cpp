@@ -43,10 +43,12 @@ bool cancelled() {
 	return result;
 }
 
-int progress(void*, curl_off_t total, curl_off_t current, curl_off_t, curl_off_t) {
+int progress(void*, curl_off_t, curl_off_t current, curl_off_t, curl_off_t) {
 	mutexLock(&lock);
-	if (state.phase == SWITCH_UPDATE_DOWNLOADING && total > 0)
-		state.progress = static_cast<unsigned>(current * 100 / total);
+	if (state.phase == SWITCH_UPDATE_DOWNLOADING && expectedSize) {
+		state.progress = static_cast<unsigned>(current * 100 / expectedSize);
+		if (state.progress > 100) state.progress = 100;
+	}
 	bool stop = !running;
 	mutexUnlock(&lock);
 	return stop;
@@ -266,7 +268,7 @@ void install() {
 	mutexLock(&lock);
 	state.progress = 100;
 	mutexUnlock(&lock);
-	status(SWITCH_UPDATE_READY, "Update installed. Restarting the application.");
+	status(SWITCH_UPDATE_READY, "Update installed. Ready to restart when you choose.");
 }
 
 void work(void*) {
