@@ -4,6 +4,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "feature/gui/gui-runner.h"
+#include "gui-ui.h"
+#include "achievements.h"
 #include <mgba/core/core.h>
 #include <mgba/internal/gb/video.h>
 #include <mgba/internal/gba/audio.h>
@@ -189,12 +191,14 @@ static void _mapKey(struct mInputMap* map, uint32_t binding, int nativeKey, int 
 }
 
 static void _drawStart(void) {
+	SwitchAchievementsIdle();
 	glClearColor(0.f, 0.f, 0.f, 1.f);
 	glClear(GL_COLOR_BUFFER_BIT);
 }
 
 static void _drawEnd(void) {
 	if (frameLimiter || framecount >= framecap) {
+		SwitchUIAchievementsNotice();
 		eglSwapBuffers(s_display, s_surface);
 		framecount = 0;
 	}
@@ -279,6 +283,7 @@ static void _resetSampleRate(u32 samplerate) {
 }
 
 static void _setup(struct mGUIRunner* runner) {
+	SwitchAchievementsAttach(runner->core);
 	_mapKey(&runner->core->inputMap, AUTO_INPUT, HidNpadButton_A, GBA_KEY_A);
 	_mapKey(&runner->core->inputMap, AUTO_INPUT, HidNpadButton_B, GBA_KEY_B);
 	_mapKey(&runner->core->inputMap, AUTO_INPUT, HidNpadButton_Plus, GBA_KEY_START);
@@ -321,6 +326,7 @@ static void _setup(struct mGUIRunner* runner) {
 }
 
 static void _gameLoaded(struct mGUIRunner* runner) {
+	SwitchAchievementsSetPaused(false);
 	mCoreConfigGetUIntValue(&runner->config, "fastForwardCap", &framecap);
 
 	unsigned mode;
@@ -366,6 +372,7 @@ static void _gameLoaded(struct mGUIRunner* runner) {
 }
 
 static void _gameUnloaded(struct mGUIRunner* runner) {
+	SwitchAchievementsSetPaused(true);
 	UNUSED(runner);
 	HidVibrationValue values[4];
 	memcpy(&values[0], &vibrationStop, sizeof(rumble.value));
@@ -374,6 +381,11 @@ static void _gameUnloaded(struct mGUIRunner* runner) {
 	memcpy(&values[3], &vibrationStop, sizeof(rumble.value));
 	hidSendVibrationValues(vibrationDeviceHandles, values, 4);
 	audrvVoiceStop(&audrenDriver, 0);
+}
+
+static void _achievementsGameUnloaded(struct mGUIRunner* runner) {
+	SwitchAchievementsDetach();
+	_gameUnloaded(runner);
 }
 
 static void _drawTex(struct mGUIRunner* runner, unsigned width, unsigned height, bool faded, bool blendTop) {
@@ -548,6 +560,7 @@ static void _setFrameLimiter(struct mGUIRunner* runner, bool limit) {
 
 static bool _running(struct mGUIRunner* runner) {
 	UNUSED(runner);
+	if (SwitchUIUpdatesShouldExit()) return false;
 	u8 newMode = appletGetOperationMode();
 	if (newMode != vmode) {
 		if (newMode == AppletOperationMode_Console) {
@@ -656,18 +669,27 @@ static uint8_t _lightSensorRead(struct GBALuminanceSource* lux) {
 }
 
 static int _batteryState(void) {
+	static u64 sampled;
+	static int cached = BATTERY_NOT_PRESENT;
+	u64 now = armGetSystemTick();
+	if (sampled && armTicksToNs(now - sampled) < 1000000000ULL) {
+		return cached;
+	}
+	sampled = now;
 	u32 charge;
 	int state = 0;
 	if (R_SUCCEEDED(psmGetBatteryChargePercentage(&charge))) {
 		state = charge | BATTERY_PERCENTAGE_VALID;
 	} else {
-		return BATTERY_NOT_PRESENT;
+		cached = BATTERY_NOT_PRESENT;
+		return cached;
 	}
 	PsmChargerType type;
 	if (R_SUCCEEDED(psmGetChargerType(&type)) && type) {
 		state |= BATTERY_CHARGING;
 	}
-	return state;
+	cached = state;
+	return cached;
 }
 
 static void _guiPrepare(void) {
@@ -845,7 +867,9 @@ int main(int argc, char* argv[]) {
 
 	socketInitializeDefault();
 	nxlinkStdio();
-	eglInit();
+	if (!eglInit()) {
+		return 1;
+	}
 	romfsInit();
 	psmInitialize();
 
@@ -868,6 +892,10 @@ int main(int argc, char* argv[]) {
 	audrenStartAudioRenderer();
 
 	font = GUIFontCreate();
+	if (!font) {
+		fprintf(stderr, "Failed to initialize GUI font\n");
+		return 1;
+	}
 
 	vmode = appletGetOperationMode();
 	if (vmode == AppletOperationMode_Console) {
@@ -1045,12 +1073,28 @@ int main(int argc, char* argv[]) {
 				},
 				.nStates = 2
 			},
+			{
+				.title = "Artwork (SteamGridDB)",
+				.submenu = SwitchUIArtworkMenu(),
+			},
+			{
+				.title = "Interface",
+				.submenu = SwitchUIInterfaceMenu(),
+			},
+			{
+				.title = "RetroAchievements",
+				.submenu = SwitchUIAchievementsMenu(),
+			},
+			{
+				.title = "Updates",
+				.submenu = SwitchUIUpdatesMenu(),
+			},
 		},
-		.nConfigExtra = 6,
+		.nConfigExtra = 10,
 		.setup = _setup,
 		.teardown = NULL,
 		.gameLoaded = _gameLoaded,
-		.gameUnloaded = _gameUnloaded,
+		.gameUnloaded = _achievementsGameUnloaded,
 		.prepareForFrame = _prepareForFrame,
 		.drawFrame = _drawFrame,
 		.drawScreenshot = _drawScreenshot,
@@ -1070,6 +1114,8 @@ int main(int argc, char* argv[]) {
 	_mapKey(&runner.params.keyMap, AUTO_INPUT, HidNpadButton_Down, GUI_INPUT_DOWN);
 	_mapKey(&runner.params.keyMap, AUTO_INPUT, HidNpadButton_Left, GUI_INPUT_LEFT);
 	_mapKey(&runner.params.keyMap, AUTO_INPUT, HidNpadButton_Right, GUI_INPUT_RIGHT);
+	SwitchUIInit(&runner);
+	SwitchUIUpdatesStart(argc > 0 ? argv[0] : NULL);
 
 	if (argc > 0) {
 		struct VFile* vf = VFileOpen("romfs:/fileassoc.cfg.in", O_RDONLY);
@@ -1101,6 +1147,7 @@ int main(int argc, char* argv[]) {
 		mGUIRunloop(&runner);
 	}
 
+	SwitchUIDeinit();
 	mGUIDeinit(&runner);
 
 	audrvClose(&audrenDriver);

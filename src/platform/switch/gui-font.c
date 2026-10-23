@@ -10,6 +10,8 @@
 #include <mgba-util/vfs.h>
 
 #include <GLES3/gl3.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
 
 #define GLYPH_HEIGHT 24
 #define CELL_HEIGHT 32
@@ -53,14 +55,29 @@ static const char* const _fragmentShader =
 	"uniform vec3 colorModulus;\n"
 
 	"void main() {\n"
-	"	vec4 texColor = texture2D(tex, texCoord);\n"
-	"	texColor.a = clamp((texColor.a - cutoff) / (1.0 - cutoff), 0.0, 1.0);\n"
+	"	vec4 texColor = texture(tex, texCoord);\n"
+	"	texColor.a = clamp((texColor.r - cutoff) / (1.0 - cutoff), 0.0, 1.0);\n"
 	"	texColor.rgb = fragColor.rgb * colorModulus;\n"
 	"	texColor.a *= fragColor.a;\n"
 	"	outColor = texColor;\n"
 	"}";
 
+struct CachedGlyph {
+	uint32_t code;
+	unsigned size;
+	int x, y, w, h, left, top, advance;
+};
+
 struct GUIFont {
+	FT_Library library;
+	FT_Face face;
+	uint16_t (*widths)[128];
+	unsigned size;
+	GLuint textTexture;
+	GLuint batchTexture;
+	struct CachedGlyph cache[512];
+	unsigned cacheCount;
+	int atlasX, atlasY, atlasRow;
 	GLuint font;
 	int currentGlyph;
 	GLuint program;
@@ -113,7 +130,7 @@ static bool _loadTexture(const char* path) {
 			success = false;
 		}
 		if (success) {
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_ALPHA, width, height, 0, GL_ALPHA, GL_UNSIGNED_BYTE, pixels);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, pixels);
 		}
 	}
 	PNGReadClose(png, info, end);
@@ -125,7 +142,7 @@ static bool _loadTexture(const char* path) {
 }
 
 struct GUIFont* GUIFontCreate(void) {
-	struct GUIFont* font = malloc(sizeof(struct GUIFont));
+	struct GUIFont* font = calloc(1, sizeof(struct GUIFont));
 	if (!font) {
 		return NULL;
 	}
@@ -141,6 +158,21 @@ struct GUIFont* GUIFontCreate(void) {
 		return NULL;
 	}
 
+	font->size = GLYPH_HEIGHT;
+	font->widths = calloc(37, sizeof(*font->widths));
+	font->batchTexture = font->font;
+	if (!FT_Init_FreeType(&font->library)) {
+		if (!FT_New_Face(font->library, "romfs:/SourceSans3-Regular.otf", 0, &font->face)) {
+			FT_Set_Pixel_Sizes(font->face, 0, font->size);
+			glGenTextures(1, &font->textTexture);
+			glBindTexture(GL_TEXTURE_2D, font->textTexture);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, 512, 512, 0, GL_RED, GL_UNSIGNED_BYTE, NULL);
+		}
+	}
 	font->currentGlyph = 0;
 	font->program = glCreateProgram();
 	GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
@@ -161,11 +193,13 @@ struct GUIFont* GUIFontCreate(void) {
 	glCompileShader(fragmentShader);
 
 	GLint success;
+	bool shadersValid = true;
 	glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
 	if (!success) {
 		GLchar msg[512];
 		glGetShaderInfoLog(fragmentShader, sizeof(msg), NULL, msg);
 		puts(msg);
+		shadersValid = false;
 	}
 
 	glCompileShader(vertexShader);
@@ -175,6 +209,7 @@ struct GUIFont* GUIFontCreate(void) {
 		GLchar msg[512];
 		glGetShaderInfoLog(vertexShader, sizeof(msg), NULL, msg);
 		puts(msg);
+		shadersValid = false;
 	}
 
 	glLinkProgram(font->program);
@@ -184,10 +219,15 @@ struct GUIFont* GUIFontCreate(void) {
 		GLchar msg[512];
 		glGetProgramInfoLog(font->program, sizeof(msg), NULL, msg);
 		puts(msg);
+		shadersValid = false;
 	}
 
 	glDeleteShader(vertexShader);
 	glDeleteShader(fragmentShader);
+	if (!shadersValid) {
+		GUIFontDestroy(font);
+		return NULL;
+	}
 
 	font->texLocation = glGetUniformLocation(font->program, "tex");
 	font->cutoffLocation = glGetUniformLocation(font->program, "cutoff");
@@ -258,6 +298,10 @@ struct GUIFont* GUIFontCreate(void) {
 }
 
 void GUIFontDestroy(struct GUIFont* font) {
+	if (font->face) FT_Done_Face(font->face);
+	if (font->library) FT_Done_FreeType(font->library);
+	free(font->widths);
+	glDeleteTextures(1, &font->textTexture);
 	glDeleteBuffers(1, &font->vbo);
 	glDeleteBuffers(1, &font->originVbo);
 	glDeleteBuffers(1, &font->glyphVbo);
@@ -271,16 +315,21 @@ void GUIFontDestroy(struct GUIFont* font) {
 }
 
 unsigned GUIFontHeight(const struct GUIFont* font) {
-	UNUSED(font);
-	return GLYPH_HEIGHT;
+	return font->size;
 }
 
 unsigned GUIFontGlyphWidth(const struct GUIFont* font, uint32_t glyph) {
-	UNUSED(font);
+	uint16_t* width = font->widths && glyph < 128 ? &font->widths[font->size - 12][glyph] : NULL;
+	if (width && *width) return *width - 1;
+	if (font->face && !FT_Load_Char(font->face, glyph, FT_LOAD_DEFAULT)) {
+		unsigned advance = font->face->glyph->advance.x >> 6;
+		if (width) *width = advance + 1;
+		return advance;
+	}
 	if (glyph > 0x7F) {
 		glyph = '?';
 	}
-	return defaultFontMetrics[glyph].width * 2;
+	return defaultFontMetrics[glyph].width * font->size / 12;
 }
 
 void GUIFontIconMetrics(const struct GUIFont* font, enum GUIIcon icon, unsigned* w, unsigned* h) {
@@ -302,7 +351,71 @@ void GUIFontIconMetrics(const struct GUIFont* font, enum GUIIcon icon, unsigned*
 	}
 }
 
+void SwitchUIFontSize(struct GUIFont* font, unsigned size) {
+	if (size < 12) size = 12;
+	if (size > 48) size = 48;
+	if (font->size == size) return;
+	font->size = size;
+	if (font->face) FT_Set_Pixel_Sizes(font->face, 0, size);
+}
+
+unsigned SwitchUIFontSizeGet(const struct GUIFont* font) {
+	return font->size;
+}
+
+static void _batchTexture(struct GUIFont* font, GLuint texture) {
+	if (font->batchTexture != texture) GUIFontDrawSubmit(font);
+	font->batchTexture = texture;
+}
+
+static struct CachedGlyph* _glyph(struct GUIFont* font, uint32_t code) {
+	unsigned i;
+	for (i = 0; i < font->cacheCount; ++i) {
+		if (font->cache[i].code == code && font->cache[i].size == font->size) return &font->cache[i];
+	}
+	if (FT_Load_Char(font->face, code, FT_LOAD_RENDER)) return NULL;
+	FT_GlyphSlot slot = font->face->glyph;
+	int w = slot->bitmap.width, h = slot->bitmap.rows;
+	if (font->atlasX + w + 2 > 512) {
+		font->atlasX = 0;
+		font->atlasY += font->atlasRow;
+		font->atlasRow = 0;
+	}
+	if (font->atlasY + h + 2 > 512 || font->cacheCount == 512) {
+		GUIFontDrawSubmit(font);
+		font->cacheCount = 0;
+		font->atlasX = font->atlasY = font->atlasRow = 0;
+	}
+	struct CachedGlyph* g = &font->cache[font->cacheCount++];
+	*g = (struct CachedGlyph) {code, font->size, font->atlasX + 1, font->atlasY + 1, w, h,
+	                         slot->bitmap_left, slot->bitmap_top, slot->advance.x >> 6};
+	if (w && h) {
+		GLint active, texture, unpack;
+		glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+		glActiveTexture(GL_TEXTURE0);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+		glGetIntegerv(GL_UNPACK_ALIGNMENT, &unpack);
+		glBindTexture(GL_TEXTURE_2D, font->textTexture);
+		glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+		unsigned char* pixels = calloc((w + 2) * (h + 2), 1);
+		if (pixels) {
+			for (int row = 0; row < h; ++row) memcpy(pixels + (row + 1) * (w + 2) + 1, slot->bitmap.buffer + row * slot->bitmap.pitch, w);
+			glTexSubImage2D(GL_TEXTURE_2D, 0, g->x - 1, g->y - 1, w + 2, h + 2, GL_RED, GL_UNSIGNED_BYTE, pixels);
+			free(pixels);
+		}
+		glPixelStorei(GL_UNPACK_ALIGNMENT, unpack);
+		glBindTexture(GL_TEXTURE_2D, texture);
+		glActiveTexture(active);
+	}
+	font->atlasX += w + 2;
+	if (h + 2 > font->atlasRow) font->atlasRow = h + 2;
+	return g;
+}
+
 void GUIFontDrawGlyph(struct GUIFont* font, int x, int y, uint32_t color, uint32_t glyph) {
+	struct CachedGlyph* cached = NULL;
+	if (font->face) cached = _glyph(font, glyph);
+	_batchTexture(font, cached ? font->textTexture : font->font);
 	if (glyph > 0x7F) {
 		glyph = '?';
 	}
@@ -321,10 +434,28 @@ void GUIFontDrawGlyph(struct GUIFont* font, int x, int y, uint32_t color, uint32
 	font->glyphData[offset][1] = (glyph >> 4) * CELL_HEIGHT + metric.padding.top * 2;
 	font->dimsData[offset][0] = CELL_WIDTH - (metric.padding.left + metric.padding.right) * 2;
 	font->dimsData[offset][1] = CELL_HEIGHT - (metric.padding.top + metric.padding.bottom) * 2;
+	if (cached) {
+		font->originData[offset][0] = x + cached->left;
+		font->originData[offset][1] = y - cached->top;
+		font->glyphData[offset][0] = cached->x;
+		font->glyphData[offset][1] = cached->y;
+		font->dimsData[offset][0] = cached->w;
+		font->dimsData[offset][1] = cached->h;
+	} else {
+		float scale = font->size / 24.f;
+		font->originData[offset][1] = y - font->size + metric.padding.top * 2 * scale;
+	}
 	font->transformData[0][offset][0] = 1.0f;
 	font->transformData[0][offset][1] = 0.0f;
 	font->transformData[1][offset][0] = 0.0f;
 	font->transformData[1][offset][1] = 1.0f;
+	if (!cached) {
+		float scale = font->size / 24.f;
+		font->originData[offset][0] += (scale - 1.f) * font->dimsData[offset][0] * .5f;
+		font->originData[offset][1] += (scale - 1.f) * font->dimsData[offset][1] * .5f;
+		font->transformData[0][offset][0] = scale;
+		font->transformData[1][offset][1] = scale;
+	}
 	font->colorData[offset][0] = (color & 0xFF) / 255.0f;
 	font->colorData[offset][1] = ((color >> 8) & 0xFF) / 255.0f;
 	font->colorData[offset][2] = ((color >> 16) & 0xFF) / 255.0f;
@@ -337,6 +468,7 @@ void GUIFontDrawIcon(struct GUIFont* font, int x, int y, enum GUIAlignment align
 	if (icon >= GUI_ICON_MAX) {
 		return;
 	}
+	_batchTexture(font, font->font);
 	struct GUIIconMetric metric = defaultIconMetrics[icon];
 
 	float hFlip = 1.0f;
@@ -399,6 +531,7 @@ void GUIFontDrawIconSize(struct GUIFont* font, int x, int y, int w, int h, uint3
 	if (icon >= GUI_ICON_MAX) {
 		return;
 	}
+	_batchTexture(font, font->font);
 	struct GUIIconMetric metric = defaultIconMetrics[icon];
 
 	if (!w) {
@@ -434,10 +567,17 @@ void GUIFontDrawIconSize(struct GUIFont* font, int x, int y, int w, int h, uint3
 }
 
 void GUIFontDrawSubmit(struct GUIFont* font) {
+	if (!font->currentGlyph) {
+		return;
+	}
+	GLint active, texture;
+	glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
+	glActiveTexture(GL_TEXTURE0);
+	glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
 	glUseProgram(font->program);
 	glBindVertexArray(font->vao);
 	glActiveTexture(GL_TEXTURE0);
-	glBindTexture(GL_TEXTURE_2D, font->font);
+	glBindTexture(GL_TEXTURE_2D, font->batchTexture);
 
 	glEnable(GL_BLEND);
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -445,39 +585,31 @@ void GUIFontDrawSubmit(struct GUIFont* font) {
 	glUniform1i(font->texLocation, 0);
 
 	glBindBuffer(GL_ARRAY_BUFFER, font->originVbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 3 * MAX_GLYPHS, NULL, GL_STREAM_DRAW);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(GLfloat) * 3 * font->currentGlyph, font->originData);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 3 * font->currentGlyph, font->originData, GL_STREAM_DRAW);
 
 	glBindBuffer(GL_ARRAY_BUFFER, font->glyphVbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 2 * MAX_GLYPHS, NULL, GL_STREAM_DRAW);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(GLfloat) * 2 * font->currentGlyph, font->glyphData);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 2 * font->currentGlyph, font->glyphData, GL_STREAM_DRAW);
 
 	glBindBuffer(GL_ARRAY_BUFFER, font->dimsVbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 2 * MAX_GLYPHS, NULL, GL_STREAM_DRAW);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(GLfloat) * 2 * font->currentGlyph, font->dimsData);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 2 * font->currentGlyph, font->dimsData, GL_STREAM_DRAW);
 
 	glBindBuffer(GL_ARRAY_BUFFER, font->transformVbo[0]);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 2 * MAX_GLYPHS, NULL, GL_STREAM_DRAW);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(GLfloat) * 2 * font->currentGlyph, font->transformData[0]);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 2 * font->currentGlyph, font->transformData[0], GL_STREAM_DRAW);
 
 	glBindBuffer(GL_ARRAY_BUFFER, font->transformVbo[1]);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 2 * MAX_GLYPHS, NULL, GL_STREAM_DRAW);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(GLfloat) * 2 * font->currentGlyph, font->transformData[1]);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 2 * font->currentGlyph, font->transformData[1], GL_STREAM_DRAW);
 
 	glBindBuffer(GL_ARRAY_BUFFER, font->colorVbo);
-	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 4 * MAX_GLYPHS, NULL, GL_STREAM_DRAW);
-	glBufferSubData(GL_ARRAY_BUFFER, 0, sizeof(GLfloat) * 4 * font->currentGlyph, font->colorData);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat) * 4 * font->currentGlyph, font->colorData, GL_STREAM_DRAW);
 
-	glUniform1f(font->cutoffLocation, 0.1f);
-	glUniform3f(font->colorModulusLocation, 0.f, 0.f, 0.f);
-	glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, font->currentGlyph);
-
-	glUniform1f(font->cutoffLocation, 0.7f);
+	glUniform1f(font->cutoffLocation, font->batchTexture == font->textTexture ? 0.f : 0.5f);
 	glUniform3f(font->colorModulusLocation, 1.f, 1.f, 1.f);
 	glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, font->currentGlyph);
 
 	font->currentGlyph = 0;
 
+	glBindTexture(GL_TEXTURE_2D, texture);
+	glActiveTexture(active);
 	glBindVertexArray(0);
 	glUseProgram(0);
 }

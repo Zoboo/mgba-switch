@@ -1,0 +1,476 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+#include "artwork.h"
+#include <switch.h>
+#include <curl/curl.h>
+#include "../../third-party/discord-rpc/include/rapidjson/document.h"
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstring>
+#include <cerrno>
+#include <sys/stat.h>
+#include <unistd.h>
+
+namespace {
+Mutex lock;
+CondVar changed;
+bool busy, suspended;
+Thread worker;
+bool initialized, running, covers, banners, testKey;
+unsigned generation, activeRevision;
+struct Option { SwitchArtworkOption view; std::string url; };
+std::vector<Option> options;
+bool needsChoice, searching, finished, searchPending, choosePending;
+bool resetPending, resetBanner;
+bool resetSucceeded;
+unsigned resetSerial, resetCompleted;
+std::string resetRom;
+bool choiceCovers, choiceBanners;
+unsigned percent, imageRevision;
+bool unavailable;
+std::vector<std::string> discarded;
+void discardOptions() { for (const auto& option : options) discarded.emplace_back(option.view.preview); options.clear(); }
+size_t chosen;
+std::string choiceRom;
+std::string searchTitle;
+std::string directory, key, pending, requested, status = "Artwork downloads disabled";
+
+std::string base(const std::string& path) {
+	size_t slash = path.find_last_of("/\\");
+	std::string name = path.substr(slash == std::string::npos ? 0 : slash + 1);
+	size_t dot = name.find_last_of('.');
+	return name.substr(0, dot);
+}
+std::string normalized(const std::string& title) {
+	std::string out;
+	for (size_t i = 0; i < title.size(); ++i) {
+		unsigned char c = title[i];
+		if (c == '(' || c == '[') break;
+		if (c == 0xC3 && i + 1 < title.size()) {
+			unsigned char accent = title[++i];
+			if (accent >= 0x80 && accent <= 0xBF) {
+				static const char latin[] = "aaaaaaaceeeeiiiidnooooo?ouuuuytsaaaaaaaceeeeiiiidnooooo?ouuuuyty";
+				char replacement = latin[accent - 0x80];
+				if (replacement != '?') out += replacement;
+			}
+		} else if (c >= 'A' && c <= 'Z') out += char(c + 'a' - 'A');
+		else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) out += char(c);
+	}
+	return out;
+}
+std::string cachePath(const std::string& rom, bool banner) {
+	uint64_t hash = UINT64_C(14695981039346656037);
+	for (unsigned char c : rom) { hash ^= c; hash *= UINT64_C(1099511628211); }
+	char name[64];
+	snprintf(name, sizeof(name), "/%016llx.%s.png", (unsigned long long) hash, banner ? "banner" : "cover");
+	return directory + name;
+}
+bool exists(const std::string& path) {
+	struct stat info;
+	return !stat(path.c_str(), &info) && S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= 8 * 1024 * 1024;
+}
+std::string selectionPath(const std::string& rom, bool banner) {
+	return cachePath(rom, banner) + ".selected.png";
+}
+bool replaceSelection(const std::string& temporary, const std::string& target) {
+	std::string backup = target + ".bak";
+	if (!rename(temporary.c_str(), target.c_str())) { remove(backup.c_str()); return true; }
+	if (!exists(target)) return false;
+	remove(backup.c_str());
+	if (rename(target.c_str(), backup.c_str())) return false;
+	if (rename(temporary.c_str(), target.c_str())) { rename(backup.c_str(), target.c_str()); return false; }
+	remove(backup.c_str());
+	return true;
+}
+void message(const char* value) {
+	mutexLock(&lock); if (generation == activeRevision) status = value; mutexUnlock(&lock);
+}
+struct Transfer { std::string data; size_t limit; unsigned revision; };
+size_t receive(char* ptr, size_t size, size_t count, void* opaque) {
+	Transfer* transfer = static_cast<Transfer*>(opaque);
+	if (size && count > transfer->limit / size) return 0;
+	size_t bytes = size * count;
+	if (bytes > transfer->limit - transfer->data.size()) return 0;
+	transfer->data.append(ptr, bytes);
+	return bytes;
+}
+int progress(void* opaque, curl_off_t total, curl_off_t now, curl_off_t, curl_off_t) {
+	Transfer* transfer = static_cast<Transfer*>(opaque);
+	mutexLock(&lock);
+	bool cancelled = !running || transfer->revision != generation;
+	if (!cancelled) percent = total > 0 ? unsigned(now * 100 / total) : 0;
+	mutexUnlock(&lock);
+	return cancelled;
+}
+bool fetch(const std::string& url, const std::string& token, unsigned revision, size_t limit, std::string& result) {
+	mutexLock(&lock); bool current = running && revision == generation; mutexUnlock(&lock);
+	if (!current) return false;
+	CURL* curl = curl_easy_init();
+	if (!curl) return false;
+	Transfer transfer = { {}, limit, revision };
+	curl_slist* headers = nullptr;
+	if (!token.empty()) headers = curl_slist_append(headers, ("Authorization: Bearer " + token).c_str());
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+	curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 5L);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, "mGBA-Switch");
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, receive);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &transfer);
+	curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+	curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, progress);
+	curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &transfer);
+	CURLcode code = curl_easy_perform(curl);
+	long response = 0;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response);
+	curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+	if (code != CURLE_OK || response != 200) return false;
+	result.swap(transfer.data);
+	return true;
+}
+bool json(const std::string& path, const std::string& token, unsigned revision, rapidjson::Document& document) {
+	std::string body;
+	if (!fetch("https://www.steamgriddb.com/api/v2/" + path, token, revision, 1024 * 1024, body)) return false;
+	document.Parse(body.c_str());
+	return !document.HasParseError() && document.IsObject() && document.HasMember("data") && document["data"].IsArray();
+}
+bool validImage(const std::string& bytes) {
+	if (bytes.size() < 24 || memcmp(bytes.data(), "\x89PNG\r\n\x1a\n", 8)) return false;
+	auto dimension = [&bytes](size_t offset) { const unsigned char* p = reinterpret_cast<const unsigned char*>(bytes.data()) + offset; return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; };
+	uint32_t width = dimension(16), height = dimension(20);
+	return width && height && width <= 4096 && height <= 4096 && uint64_t(width) * height <= 8 * 1024 * 1024;
+}
+bool download(const std::string& rom, bool banner, unsigned id, const std::string& token, unsigned revision) {
+	std::string target = cachePath(rom, banner);
+	if (exists(target)) return true;
+	rapidjson::Document document;
+	std::string route = banner ? "heroes/game/" : "grids/game/";
+	route += std::to_string(id);
+	route += banner ? "?mimes=image/png&types=static" : "?dimensions=600x900&mimes=image/png&types=static";
+	if (!json(route, token, revision, document)) return false;
+	if (document["data"].Empty()) unavailable = true;
+	for (const auto& item : document["data"].GetArray()) {
+		if (!item.IsObject() || !item.HasMember("url") || !item["url"].IsString()) continue;
+		std::string url = item["url"].GetString();
+		if (url.find("https://cdn2.steamgriddb.com/") != 0 && url.find("https://cdn.steamgriddb.com/") != 0) continue;
+		std::string bytes;
+		if (!fetch(url, "", revision, 8 * 1024 * 1024, bytes)) continue;
+		if (!validImage(bytes)) continue;
+		auto dimension = [&bytes](size_t offset) { const unsigned char* p = (const unsigned char*) bytes.data() + offset; return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) | p[3]; };
+		if (!dimension(16) || !dimension(20) || dimension(16) > 4096 || dimension(20) > 4096 || uint64_t(dimension(16)) * dimension(20) > 8 * 1024 * 1024) continue;
+		std::string temporary = target + ".tmp";
+		FILE* file = fopen(temporary.c_str(), "wb");
+		if (!file) return false;
+		bool ok = fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
+		if (fclose(file)) ok = false;
+		mutexLock(&lock);
+		bool current = running && revision == generation;
+		mutexUnlock(&lock);
+		ok = ok && current && !rename(temporary.c_str(), target.c_str());
+		if (ok) { mutexLock(&lock); ++imageRevision; mutexUnlock(&lock); }
+		remove(temporary.c_str());
+		return ok;
+	}
+	return false;
+}
+struct Job {
+	~Job() { mutexLock(&lock); busy = false; condvarWakeAll(&changed); mutexUnlock(&lock); }
+};
+void work(void*) {
+	while (true) {
+		mutexLock(&lock);
+		while (running && !resetPending && discarded.empty() && (suspended || key.empty() || (!testKey && !searchPending && !choosePending && (pending.empty() || (!covers && !banners))))) condvarWait(&changed, &lock);
+		std::vector<std::string> cleanup; cleanup.swap(discarded);
+		bool alive = running;
+		bool reset = resetPending, restoreBanner = resetBanner;
+		unsigned restoreId = resetSerial;
+		std::string restoreRom = resetRom;
+		resetPending = false;
+		bool cleanupOnly = suspended || key.empty();
+		busy = alive;
+		std::string rom = pending, token = key;
+		bool cover = covers, banner = banners, test = testKey;
+		if (cleanupOnly) rom.clear();
+		bool search = searchPending, choose = choosePending;
+		std::string query = searchTitle;
+		Option selected = choose && chosen < options.size() ? options[chosen] : Option{};
+		if (search || choose) rom = choiceRom;
+		if (search) { cover = choiceCovers; banner = choiceBanners; }
+		searchPending = choosePending = false;
+		percent = 0; finished = false;
+		unsigned revision = generation; activeRevision = revision;
+		pending.clear(); testKey = false;
+		mutexUnlock(&lock);
+		for (const auto& path : cleanup) remove(path.c_str());
+		if (!alive && !reset) break;
+		Job job;
+		if (reset) {
+			std::string target = selectionPath(restoreRom, restoreBanner);
+			bool ok = !remove((target + ".bak").c_str()) || errno == ENOENT;
+			if (ok) ok = !remove(target.c_str()) || errno == ENOENT;
+			mutexLock(&lock);
+			++imageRevision;
+			resetCompleted = restoreId;
+			resetSucceeded = ok;
+			if (revision == generation) {
+				finished = true;
+				status = ok ? "Original artwork restored" : "Could not reset artwork";
+			}
+			mutexUnlock(&lock);
+			continue;
+		}
+		if (cleanupOnly || (rom.empty() && !test && !search && !choose)) continue;
+		if (!search && !choose && !test) {
+			char path[4096];
+			if (cover && SwitchArtworkPath(rom.c_str(), false, path, sizeof(path))) cover = false;
+			if (banner && SwitchArtworkPath(rom.c_str(), true, path, sizeof(path))) banner = false;
+			if (!cover && !banner) { message("Artwork ready"); continue; }
+		}
+		if (choose) {
+			std::string bytes;
+			bool ok = fetch(selected.url, "", revision, 8 * 1024 * 1024, bytes);
+			if (ok && validImage(bytes)) {
+				std::string target = selectionPath(rom, selected.view.banner), temp = target + ".tmp";
+				FILE* file = fopen(temp.c_str(), "wb");
+				ok = file && fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
+				if (file && fclose(file)) ok = false;
+				mutexLock(&lock); bool current = revision == generation && running; mutexUnlock(&lock);
+				ok = ok && current && replaceSelection(temp, target); remove(temp.c_str());
+			} else ok = false;
+			mutexLock(&lock); if (revision == generation) { if (ok) ++imageRevision; finished = true; status = ok ? "Artwork ready" : "Artwork download failed"; } mutexUnlock(&lock);
+			continue;
+		}
+		message("Contacting SteamGridDB...");
+		CURL* curl = curl_easy_init();
+		if (!curl) { message("Network unavailable"); mutexLock(&lock); if (revision == generation) { searching = false; finished = true; } mutexUnlock(&lock); continue; }
+		std::string title = test ? "Metroid" : search && !query.empty() ? query : base(rom);
+		size_t suffix = title.find_first_of("([");
+		if (!search && suffix != std::string::npos) title.resize(suffix);
+		char* encoded = curl_easy_escape(curl, title.c_str(), title.size());
+		std::string route = "search/autocomplete/" + std::string(encoded ? encoded : "");
+		curl_free(encoded); curl_easy_cleanup(curl);
+		rapidjson::Document document;
+		if (!json(route, token, revision, document)) { message("SteamGridDB request failed; check key or network"); mutexLock(&lock); if (revision == generation) { searching = false; finished = true; } mutexUnlock(&lock); continue; }
+		if (test) { message("SteamGridDB connection successful"); continue; }
+		if (search) {
+			struct Game { unsigned id; std::string title; unsigned score; };
+			std::vector<Game> games;
+			std::string needle = normalized(title);
+			for (const auto& item : document["data"].GetArray()) {
+				if (!item.IsObject() || !item.HasMember("id") || !item["id"].IsUint() || !item.HasMember("name") || !item["name"].IsString()) continue;
+				std::string name = item["name"].GetString(), norm = normalized(name);
+				unsigned score = norm == needle ? 1000 : norm.find(needle) != std::string::npos ? 500 : 0;
+				for (size_t i = 0; i + 3 <= needle.size(); ++i) if (norm.find(needle.substr(i, 3)) != std::string::npos) ++score;
+				games.push_back({item["id"].GetUint(), name, score});
+			}
+			std::stable_sort(games.begin(), games.end(), [](const Game& a, const Game& b) { return a.score > b.score; });
+			size_t count = 0;
+			for (size_t g = 0; g < games.size() && g < 6 && count < 12; ++g) {
+				for (unsigned kind = 0; kind < 2 && count < 12; ++kind) {
+					if (kind ? !banner : !cover) continue;
+					rapidjson::Document art;
+					std::string route = (kind ? "heroes/game/" : "grids/game/") + std::to_string(games[g].id) + (kind ? "?mimes=image/png&types=static" : "?dimensions=600x900&mimes=image/png&types=static");
+					if (!json(route, token, revision, art)) continue;
+					unsigned perGame = 0;
+					for (const auto& item : art["data"].GetArray()) {
+						if (count >= 12 || perGame >= 2) break;
+						if (!item.IsObject() || !item.HasMember("url") || !item["url"].IsString()) continue;
+						std::string url = item["url"].GetString();
+						if (url.find("https://cdn2.steamgriddb.com/") && url.find("https://cdn.steamgriddb.com/")) continue;
+						std::string bytes;
+						if (!fetch(url, "", revision, 8 * 1024 * 1024, bytes) || !validImage(bytes)) continue;
+						Option option{}; option.url = url; option.view.id = games[g].id; option.view.banner = kind;
+						snprintf(option.view.title, sizeof(option.view.title), "%s (%s)", games[g].title.c_str(), kind ? "Banner" : "Cover");
+						std::string path = directory + "/choice-" + std::to_string(revision) + "-" + std::to_string(count) + ".png";
+						FILE* f = fopen(path.c_str(), "wb"); bool ok = f && fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size(); if (f && fclose(f)) ok = false;
+						if (!ok) { remove(path.c_str()); continue; }
+						snprintf(option.view.preview, sizeof(option.view.preview), "%s", path.c_str());
+						mutexLock(&lock); bool current = revision == generation && running; if (current) options.push_back(option); mutexUnlock(&lock);
+						if (!current) { remove(path.c_str()); break; } ++count; ++perGame;
+					}
+				}
+			}
+			mutexLock(&lock); if (revision == generation) { searching = false; finished = true; status = count ? "Choose artwork or cancel" : "No matching artwork found"; } mutexUnlock(&lock);
+			continue;
+		}
+		unsigned id = 0;
+		bool ambiguous = false;
+		for (const auto& item : document["data"].GetArray()) {
+			if (item.IsObject() && item.HasMember("id") && item["id"].IsUint() && item.HasMember("name") && item["name"].IsString() && normalized(item["name"].GetString()) == normalized(title)) { unsigned match = item["id"].GetUint(); if (id && id != match) ambiguous = true; id = match; }
+		}
+		if (ambiguous || !id) {
+			mutexLock(&lock); if (revision == generation) { needsChoice = true; choiceRom = rom; choiceCovers = cover; choiceBanners = banner; status = "No exact match. Search alternatives?"; } mutexUnlock(&lock); continue;
+		}
+		bool complete = true; unavailable = false;
+		if (cover) complete = download(rom, false, id, token, revision);
+		if (banner) complete = download(rom, true, id, token, revision) && complete;
+		message(complete ? "Artwork ready" : "Artwork unavailable or download failed");
+		if (!complete && unavailable) {
+			char path[4096];
+			bool missingCover = cover && !SwitchArtworkPath(rom.c_str(), false, path, sizeof(path));
+			bool missingBanner = banner && !SwitchArtworkPath(rom.c_str(), true, path, sizeof(path));
+			mutexLock(&lock); if (revision == generation && (missingCover || missingBanner)) { needsChoice = true; choiceRom = rom; choiceCovers = missingCover; choiceBanners = missingBanner; } mutexUnlock(&lock);
+		}
+	}
+}
+}
+
+extern "C" {
+void SwitchArtworkGetState(SwitchArtworkState* state) {
+	if (!state) return; *state = {}; if (!initialized) return;
+	mutexLock(&lock);
+	state->resetId = resetSerial;
+	state->resetDone = resetCompleted;
+	state->resetSucceeded = resetSucceeded;
+	state->busy = busy; state->needsChoice = needsChoice; state->searching = searching; state->finished = finished; state->percent = percent; state->revision = imageRevision; state->count = options.size(); snprintf(state->rom, sizeof(state->rom), "%s", choiceRom.empty() ? requested.c_str() : choiceRom.c_str()); snprintf(state->message, sizeof(state->message), "%s", status.c_str()); mutexUnlock(&lock);
+}
+bool SwitchArtworkGetOption(size_t index, SwitchArtworkOption* option) {
+	if (!initialized || !option) return false; mutexLock(&lock); bool ok = index < options.size(); if (ok) *option = options[index].view; mutexUnlock(&lock); return ok;
+}
+bool SwitchArtworkOpen(const char* rom, bool banner) {
+	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
+	mutexLock(&lock);
+	choiceRom = requested = rom;
+	choiceCovers = !banner;
+	choiceBanners = banner;
+	suspended = needsChoice = searching = searchPending = choosePending = testKey = false;
+	finished = false;
+	pending.clear();
+	discardOptions();
+	++generation;
+	condvarWakeAll(&changed);
+	mutexUnlock(&lock);
+	return true;
+}
+bool SwitchArtworkReset(const char* rom, bool banner) {
+	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
+	mutexLock(&lock);
+	if (resetPending) { mutexUnlock(&lock); return false; }
+	resetRom = requested = rom;
+	resetBanner = banner;
+	resetPending = true;
+	++resetSerial;
+	needsChoice = searching = searchPending = choosePending = testKey = false;
+	finished = false;
+	percent = 0;
+	status = banner ? "Restoring original banner..." : "Restoring original cover...";
+	pending.clear();
+	discardOptions();
+	++generation;
+	condvarWakeAll(&changed);
+	mutexUnlock(&lock);
+	return true;
+}
+void SwitchArtworkSearch(const char* title) {
+	if (!initialized || !title || !*title || strlen(title) > 512) return;
+	mutexLock(&lock);
+	if (!choiceRom.empty() && !key.empty()) {
+		searchTitle = title;
+		needsChoice = choosePending = false;
+		searching = searchPending = true;
+		finished = false;
+		percent = 0;
+		status = "Searching SteamGridDB...";
+		discardOptions();
+		pending.clear();
+		++generation;
+		condvarWakeAll(&changed);
+	} else if (key.empty()) {
+		finished = true;
+		status = "Add a SteamGridDB API key in Settings > Artwork to search.";
+	}
+	mutexUnlock(&lock);
+}
+void SwitchArtworkChoose(size_t index) {
+	if (!initialized) return; mutexLock(&lock); if (index < options.size()) { chosen = index; choosePending = true; searchPending = searching = needsChoice = false; finished = false; ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
+}
+void SwitchArtworkCancelChoice(void) {
+	if (!initialized) return; mutexLock(&lock); ++generation; searchPending = choosePending = searching = needsChoice = false; finished = true; discardOptions(); pending.clear(); status = "Artwork selection cancelled"; condvarWakeAll(&changed); mutexUnlock(&lock);
+}
+void SwitchArtworkInit(const char* path) {
+	if (initialized || !path || !*path) return;
+	mutexInit(&lock);
+	condvarInit(&changed);
+	suspended = false;
+	directory = path;
+	mkdir(directory.c_str(), 0700);
+	char buffer[129] = {};
+	FILE* file = fopen((directory + "/steamgriddb.key").c_str(), "rb");
+	if (file) { size_t n = fread(buffer, 1, 128, file); fclose(file); buffer[n] = 0; key = buffer; for (unsigned char c : key) if (!std::isalnum(c)) { key.clear(); break; } }
+	if (curl_global_init(CURL_GLOBAL_DEFAULT)) return;
+	running = true;
+	if (R_FAILED(threadCreate(&worker, work, nullptr, nullptr, 128 * 1024, 0x3B, -2))) { running = false; curl_global_cleanup(); return; }
+	if (R_FAILED(threadStart(&worker))) { threadClose(&worker); running = false; curl_global_cleanup(); return; }
+	initialized = true;
+}
+void SwitchArtworkSuspend(void) {
+	if (!initialized) return;
+	mutexLock(&lock); suspended = true; pending.clear(); testKey = false; requested.clear(); ++generation;
+	searchPending = choosePending = needsChoice = searching = false; discardOptions();
+	mutexUnlock(&lock);
+}
+void SwitchArtworkDeinit(void) {
+	if (!initialized) return;
+	mutexLock(&lock); running = false; discardOptions(); ++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
+	threadWaitForExit(&worker); threadClose(&worker);
+	curl_global_cleanup(); key.clear(); initialized = false;
+}
+bool SwitchArtworkSetKey(const char* value) {
+	if (!initialized || !value || strlen(value) > 128) return false;
+	for (const unsigned char* c = (const unsigned char*) value; *c; ++c) if (!std::isalnum(*c)) return false;
+	std::string destination = directory + "/steamgriddb.key", temporary = destination + ".tmp";
+	if (*value) {
+		FILE* file = fopen(temporary.c_str(), "wb");
+		if (!file) return false;
+		bool ok = fwrite(value, 1, strlen(value), file) == strlen(value);
+		if (fclose(file)) ok = false;
+		if (!ok || rename(temporary.c_str(), destination.c_str())) { remove(temporary.c_str()); return false; }
+		chmod(destination.c_str(), 0600);
+	} else if (exists(destination) && remove(destination.c_str())) return false;
+	mutexLock(&lock); key = value; requested.clear(); pending.clear(); needsChoice = searching = searchPending = choosePending = false; discardOptions(); ++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
+	return true;
+}
+bool SwitchArtworkHasKey(void) { if (!initialized) return false; mutexLock(&lock); bool result = !key.empty(); mutexUnlock(&lock); return result; }
+void SwitchArtworkSetDownloads(bool cover, bool banner) {
+	if (!initialized) return;
+	mutexLock(&lock);
+	if (covers != cover || banners != banner) { ++generation; searchPending = choosePending = needsChoice = searching = false; discardOptions(); }
+	covers = cover; banners = banner; requested.clear(); suspended = false;
+	status = cover || banner ? "Artwork ready" : "Artwork downloads disabled";
+	condvarWakeAll(&changed);
+	if (!cover && !banner) pending.clear();
+	mutexUnlock(&lock);
+}
+void SwitchArtworkRequest(const char* rom) {
+	if (!initialized || !rom) return;
+	mutexLock(&lock); if (requested != rom) { requested = rom; pending = rom; choiceRom.clear(); needsChoice = searching = finished = searchPending = choosePending = false; discardOptions(); ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
+}
+bool SwitchArtworkPath(const char* rom, bool banner, char* out, size_t size) {
+	if (!rom || !out || !size) return false;
+	std::string selected = selectionPath(rom, banner);
+	if (!exists(selected) && exists(selected + ".bak")) selected += ".bak";
+	if (exists(selected) && selected.size() < size) {
+		memcpy(out, selected.c_str(), selected.size() + 1);
+		return true;
+	}
+	std::string path = rom;
+	size_t slash = path.find_last_of("/\\"), dot = path.find_last_of('.');
+	if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) path.resize(dot);
+	path += banner ? ".banner.png" : ".cover.png";
+	if (!exists(path)) path = cachePath(rom, banner);
+	if (!exists(path) || path.size() >= size) { out[0] = 0; return false; }
+	memcpy(out, path.c_str(), path.size() + 1); return true;
+}
+void SwitchArtworkTest(void) { if (!initialized) return; mutexLock(&lock); if (key.empty()) { status = "Enter an API key first"; mutexUnlock(&lock); return; } testKey = true; ++generation; condvarWakeAll(&changed); mutexUnlock(&lock); }
+void SwitchArtworkStatus(char* out, size_t size) { if (!out || !size) return; if (!initialized) { snprintf(out, size, "Artwork service unavailable"); return; } mutexLock(&lock); snprintf(out, size, "%s", status.c_str()); mutexUnlock(&lock); }
+}
