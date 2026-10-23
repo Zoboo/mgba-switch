@@ -23,6 +23,7 @@ Mutex lock;
 CondVar changed;
 Thread worker;
 bool initialized, running;
+bool pendingInstall;
 int request;
 SwitchUpdaterState state = {};
 std::string executable, downloadUrl, expectedHash;
@@ -207,7 +208,6 @@ size_t writeDownload(char* bytes, size_t size, size_t count, void* userdata) {
 
 void install() {
 	std::string temporary = executable + ".update";
-	std::string previous = executable + ".previous";
 	unsigned char currentHeader[0x14];
 	FILE* current = fopen(executable.c_str(), "rb");
 	bool validCurrent = current && fread(currentHeader, 1, sizeof(currentHeader), current) == sizeof(currentHeader) &&
@@ -248,27 +248,11 @@ void install() {
 		status(SWITCH_UPDATE_ERROR, "Update download failed validation. The current app is unchanged.");
 		return;
 	}
-	if (remove(previous.c_str()) && errno != ENOENT) {
-		remove(temporary.c_str());
-		status(SWITCH_UPDATE_ERROR, "Could not prepare the update backup.");
-		return;
-	}
-	if (rename(executable.c_str(), previous.c_str())) {
-		remove(temporary.c_str());
-		status(SWITCH_UPDATE_ERROR, "Could not back up the current app.");
-		return;
-	}
-	if (rename(temporary.c_str(), executable.c_str())) {
-		bool restored = rename(previous.c_str(), executable.c_str()) == 0;
-		remove(temporary.c_str());
-		status(SWITCH_UPDATE_ERROR, restored ? "Could not install update. The original app was restored." :
-		       "Could not restore the app. Rename its .previous backup on the SD card.");
-		return;
-	}
 	mutexLock(&lock);
+	pendingInstall = true;
 	state.progress = 100;
 	mutexUnlock(&lock);
-	status(SWITCH_UPDATE_READY, "Update installed. Ready to restart when you choose.");
+	status(SWITCH_UPDATE_READY, "Download verified. Restart to install the update.");
 }
 
 void work(void*) {
@@ -331,6 +315,28 @@ void SwitchUpdaterDeinit(void) {
 	threadClose(&worker);
 	curl_global_cleanup();
 	initialized = false;
+}
+
+bool SwitchUpdaterApplyPending(void) {
+	if (initialized || !pendingInstall) return false;
+	std::string temporary = executable + ".update";
+	std::string previous = executable + ".previous";
+	if (remove(previous.c_str()) && errno != ENOENT) {
+		status(SWITCH_UPDATE_ERROR, "Could not prepare the update backup. The current app is unchanged.");
+		return false;
+	}
+	if (rename(executable.c_str(), previous.c_str())) {
+		status(SWITCH_UPDATE_ERROR, "Could not back up the current app after shutdown. The current app is unchanged.");
+		return false;
+	}
+	if (rename(temporary.c_str(), executable.c_str())) {
+		bool restored = rename(previous.c_str(), executable.c_str()) == 0;
+		status(SWITCH_UPDATE_ERROR, restored ? "Could not install update. The original app was restored." :
+		       "Could not restore the app. Rename its .previous backup on the SD card.");
+		return false;
+	}
+	pendingInstall = false;
+	return true;
 }
 
 void SwitchUpdaterCheck(void) {

@@ -1160,6 +1160,7 @@ int main(int argc, char* argv[]) {
 
 	psmExit();
 	romfsExit();
+	SwitchUIUpdatesFinishRestart();
 	eglDeinit();
 	socketExit();
 	return 0;

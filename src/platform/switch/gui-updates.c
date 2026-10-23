@@ -33,16 +33,30 @@ void SwitchUIUpdatesDeinit(void) {
 struct GUIMenu* SwitchUIUpdatesMenu(void) { return &_menu; }
 bool SwitchUIUpdatesShouldExit(void) { return _restart; }
 
+void SwitchUIUpdatesFinishRestart(void) {
+	if (!_restart) return;
+	const char* error = NULL;
+	struct SwitchUpdaterState state;
+	if (!SwitchUpdaterApplyPending()) {
+		SwitchUpdaterGetState(&state);
+		error = state.status;
+	} else {
+		char arguments[PATH_MAX + 3];
+		snprintf(arguments, sizeof(arguments), "\"%s\"", _executable);
+		if (R_FAILED(envSetNextLoad(_executable, arguments)))
+			error = "Update installed. Reopen the application from the homebrew menu.";
+	}
+	if (error) {
+		ErrorApplicationConfig dialog;
+		if (R_SUCCEEDED(errorApplicationCreate(&dialog, error, error))) errorApplicationShow(&dialog);
+	}
+}
+
 static void _confirmRestart(struct GUIParams* params) {
 	_restartPrompted = true;
 	if (GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
-	    "Update installed successfully.\nRestart the application now?\nA: Restart    B: Later") == GUI_MENU_EXIT_ACCEPT) {
-		char arguments[PATH_MAX + 3];
-		snprintf(arguments, sizeof(arguments), "\"%s\"", _executable);
-		if (R_SUCCEEDED(envSetNextLoad(_executable, arguments))) _restart = true;
-		else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0,
-		    "Automatic restart is unavailable. Reopen the application from the homebrew menu.");
-	}
+	    "Update downloaded and verified.\nRestart now to install it?\nA: Restart    B: Later") == GUI_MENU_EXIT_ACCEPT)
+		_restart = true;
 	GUIInvalidateKeys(params);
 }
 
@@ -116,7 +130,7 @@ bool SwitchUIUpdatesRun(struct GUIParams* params, enum GUIMenuExitReason* result
 	SwitchUIRoundRect(408, 270, 784, 56, 8, 0xFF332024);
 	SwitchUIRoundFrame(408, 270, 784, 56, 8, 0xFFFFA3BD);
 	SwitchUIPrint(params->font, 426, 305, 748, 0xFFF5F3EF, busy ? "Working in the background..." :
-	    state.phase == SWITCH_UPDATE_READY ? (_runner->core ? "Return to the library to restart" : "Update installed — restart now") :
+	    state.phase == SWITCH_UPDATE_READY ? (_runner->core ? "Return to the library to restart" : "Update downloaded — restart to install") :
 	    state.phase == SWITCH_UPDATE_AVAILABLE ? (_runner->core ? "Return to the library to install this update" : "Download update") : "Check for updates");
 	if (state.phase == SWITCH_UPDATE_DOWNLOADING) {
 		SwitchUIRoundRect(408, 364, 784, 12, 6, 0xFF332024);

@@ -25,6 +25,7 @@ struct GUIMenu* SwitchUIUpdatesMenu(void);
 bool SwitchUIUpdatesRun(struct GUIParams*, enum GUIMenuExitReason*);
 void SwitchUIUpdatesPoll(struct GUIParams*, bool prompt);
 bool SwitchUIUpdatesShouldExit(void);
+void SwitchUIUpdatesFinishRestart(void);
 struct GUIMenu* SwitchUIArtworkMenu(void);
 struct GUIMenu* SwitchUIInterfaceMenu(void);
 void SwitchUIConsoleDraw(struct GUIParams*, const struct GUIMenu*, const size_t*, size_t, size_t, float);

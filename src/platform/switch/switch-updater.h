@@ -29,6 +29,7 @@ struct SwitchUpdaterState {
 
 bool SwitchUpdaterInit(const char* executable);
 void SwitchUpdaterDeinit(void);
+bool SwitchUpdaterApplyPending(void);
 void SwitchUpdaterCheck(void);
 void SwitchUpdaterInstall(void);
 void SwitchUpdaterGetState(struct SwitchUpdaterState* state);

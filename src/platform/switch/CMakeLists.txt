@@ -21,7 +21,7 @@ list(APPEND GUI_SRC ${CMAKE_CURRENT_SOURCE_DIR}/gui-font.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-achievements.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-updates.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/switch-updater.cpp)
-set(SWITCH_UPDATE_VERSION "1.0.3" CACHE STRING "Switch frontend release version")
+set(SWITCH_UPDATE_VERSION "1.0.4" CACHE STRING "Switch frontend release version")
 find_library(SWITCH_JPEG_LIBRARY jpeg REQUIRED)
 find_library(SWITCH_CURL_LIBRARY curl REQUIRED)
 find_package(Freetype REQUIRED)
