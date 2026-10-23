@@ -510,9 +510,9 @@ static void _artworkAction(struct GUIParams* params, bool available) {
 	SwitchUIHint(params->font, 244, 60, "ZL", "Artwork");
 }
 
-static bool _pngFile(const char* name) {
+static bool _artworkImageFile(const char* name) {
 	const char* extension = strrchr(name, '.');
-	return extension && !strcasecmp(extension, ".png");
+	return extension && (!strcasecmp(extension, ".png") || !strcasecmp(extension, ".jpg") || !strcasecmp(extension, ".jpeg"));
 }
 
 static void _importArtwork(struct GUIParams* params, const char* rom) {
@@ -526,7 +526,7 @@ static void _importArtwork(struct GUIParams* params, const char* rom) {
 	params->fileIndex = 0;
 	_importingArtwork = true;
 	GUIInvalidateKeys(params);
-	bool accepted = GUISelectFile(params, selected, sizeof(selected), _pngFile, NULL, NULL);
+	bool accepted = GUISelectFile(params, selected, sizeof(selected), _artworkImageFile, NULL, NULL);
 	_importingArtwork = false;
 	params->basePath = basePath;
 	params->fileIndex = fileIndex;
@@ -765,7 +765,7 @@ static void _pickerDraw(struct GUIParams* params) {
 		}
 		_button(params->font, 120, 550, 280, "L  Reset cover", false);
 		_button(params->font, 420, 550, 300, "R  Reset banner", false);
-		_button(params->font, 740, 550, 420, "X  Import PNG from SD", false);
+		_button(params->font, 740, 550, 420, "X  Import image from SD", false);
 	}
 	SwitchUIHint(params->font, 868, 612, "B", "Cancel");
 	SwitchUIFontSize(params->font, 24);

@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "artwork.h"
+#include "artwork-jpeg.h"
 #include <mgba-util/image.h>
 #include <switch.h>
 #include <curl/curl.h>
@@ -304,24 +305,27 @@ void work(void*) {
 				struct stat info;
 				if (!fstat(fileno(input), &info) && S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= 8 * 1024 * 1024) {
 					bytes.resize(info.st_size);
-					ok = fread(&bytes[0], 1, bytes.size(), input) == bytes.size() && validImage(bytes);
+					ok = fread(&bytes[0], 1, bytes.size(), input) == bytes.size();
 				}
 				fclose(input);
 			}
 			std::string target = selectionPath(localRom, localBanner), temp = target + ".tmp";
-			if (ok) {
+			if (ok && validImage(bytes)) {
 				FILE* output = fopen(temp.c_str(), "wb");
 				ok = output && fwrite(bytes.data(), 1, bytes.size(), output) == bytes.size();
 				if (output && fclose(output)) ok = false;
 				struct mImage* image = ok ? mImageLoad(temp.c_str()) : nullptr;
 				ok = image != nullptr;
 				if (image) mImageDestroy(image);
-			}
+			} else if (ok && bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xFF &&
+			           static_cast<unsigned char>(bytes[1]) == 0xD8 && static_cast<unsigned char>(bytes[2]) == 0xFF)
+				ok = SwitchArtworkConvertJPEG(bytes.data(), bytes.size(), temp.c_str());
+			else ok = false;
 			mutexLock(&lock); bool current = revision == generation && running; mutexUnlock(&lock);
 			ok = ok && current && replaceSelection(temp, target);
 			remove(temp.c_str());
 			mutexLock(&lock);
-			if (revision == generation) { if (ok) ++imageRevision; finished = true; status = ok ? "Artwork imported" : "Import failed: choose a valid PNG (up to 8 MiB)"; }
+			if (revision == generation) { if (ok) ++imageRevision; finished = true; status = ok ? "Artwork imported" : "Import failed: choose a valid PNG, JPG or JPEG (up to 8 MiB)"; }
 			mutexUnlock(&lock);
 			continue;
 		}

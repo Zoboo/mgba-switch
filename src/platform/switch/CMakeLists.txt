@@ -14,13 +14,15 @@ list(APPEND GUI_SRC ${CMAKE_CURRENT_SOURCE_DIR}/gui-font.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-files.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-images.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/artwork.cpp
+                    ${CMAKE_CURRENT_SOURCE_DIR}/artwork-jpeg.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/achievements.cpp
                     ${CMAKE_CURRENT_SOURCE_DIR}/ra-http.cpp
                     ${CMAKE_CURRENT_SOURCE_DIR}/ra-badges.cpp
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-achievements.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-updates.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/switch-updater.cpp)
-set(SWITCH_UPDATE_VERSION "1.0.2" CACHE STRING "Switch frontend release version")
+set(SWITCH_UPDATE_VERSION "1.0.3" CACHE STRING "Switch frontend release version")
+find_library(SWITCH_JPEG_LIBRARY jpeg REQUIRED)
 find_library(SWITCH_CURL_LIBRARY curl REQUIRED)
 find_package(Freetype REQUIRED)
 find_library(SWITCH_HARFBUZZ_LIBRARY harfbuzz REQUIRED)
@@ -78,7 +80,7 @@ target_compile_definitions(${BINARY_NAME}.elf PRIVATE
 target_compile_options(${BINARY_NAME}.elf PRIVATE
     "-ffile-prefix-map=${PROJECT_SOURCE_DIR}=." "-fmacro-prefix-map=${PROJECT_SOURCE_DIR}=.")
 target_link_libraries(${BINARY_NAME}.elf ${BINARY_NAME} switch-rcheevos ${M_LIBRARY} ${EGL_LIBRARY} ${OPENGLES3_LIBRARY} ${GLAPI_LIBRARY} ${NOUVEAU_LIBRARY} ${SWITCH_CURL_LIBRARY}
-                      -Wl,--start-group ${FREETYPE_LIBRARIES} ${SWITCH_HARFBUZZ_LIBRARY} ${SWITCH_BZIP2_LIBRARY} ${PNG_LIBRARIES} ${ZLIB_LIBRARIES} -Wl,--end-group
+                      -Wl,--start-group ${FREETYPE_LIBRARIES} ${SWITCH_HARFBUZZ_LIBRARY} ${SWITCH_BZIP2_LIBRARY} ${SWITCH_JPEG_LIBRARY} ${PNG_LIBRARIES} ${ZLIB_LIBRARIES} -Wl,--end-group
                       stdc++ ${OS_LIB})
 
 add_custom_command(OUTPUT control.nacp
@@ -91,9 +93,10 @@ add_custom_command(OUTPUT romfs.bin
                    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/fileassoc.cfg.in" romfs/
                    COMMAND ${CMAKE_COMMAND} -E copy "${switch_rcheevos_SOURCE_DIR}/LICENSE" romfs/rcheevos-LICENSE
                    COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/SourceSans3-LICENSE.txt" romfs/SourceSans3-LICENSE.txt
+                   COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/libjpeg-turbo-LICENSE.txt" romfs/libjpeg-turbo-LICENSE.txt
                    COMMAND ${BUILD_ROMFS} romfs romfs.bin
                    COMMAND ${CMAKE_COMMAND} -E remove_directory romfs
-               DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/SourceSans3-LICENSE.txt" "${switch_rcheevos_SOURCE_DIR}/LICENSE" "${PROJECT_SOURCE_DIR}/res/font-new.png" "${PROJECT_SOURCE_DIR}/res/scripts/demos/SourceSans3-Regular.otf" "${CMAKE_CURRENT_SOURCE_DIR}/fileassoc.cfg.in")
+               DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/libjpeg-turbo-LICENSE.txt" "${CMAKE_CURRENT_SOURCE_DIR}/SourceSans3-LICENSE.txt" "${switch_rcheevos_SOURCE_DIR}/LICENSE" "${PROJECT_SOURCE_DIR}/res/font-new.png" "${PROJECT_SOURCE_DIR}/res/scripts/demos/SourceSans3-Regular.otf" "${CMAKE_CURRENT_SOURCE_DIR}/fileassoc.cfg.in")
 
 add_custom_target(${BINARY_NAME}.nro ALL
                   ${ELF2NRO} ${BINARY_NAME}.elf "${PROJECT_SOURCE_DIR}/${BINARY_NAME}.nro" --romfs=romfs.bin --nacp=control.nacp "--icon=${CMAKE_CURRENT_SOURCE_DIR}/icon.jpg"
