@@ -17,6 +17,7 @@
 #include <switch.h>
 #include <sys/stat.h>
 #include <strings.h>
+#include <unistd.h>
 
 #define UI_TEXT 0xFFF5F3EF
 #define UI_MUTED 0xFFB8B2AA
@@ -37,7 +38,9 @@ static char _focusPath[PATH_MAX];
 static char _bannerRom[PATH_MAX];
 static float _bannerOpacity;
 static struct GUIMenu _artworkMenu;
-static struct GUIMenu _interfaceMenu, _settingsMenu;
+static struct GUIMenu _interfaceMenu, _fileSystemMenu, _settingsMenu;
+static unsigned _fileSystemIndex;
+static bool _romDirectoryChanged;
 static unsigned _layout;
 static struct {
 	const struct GUIMenu* menu;
@@ -1164,9 +1167,103 @@ static void _libraryFooter(struct GUIParams* params, bool files, const char* act
 	SwitchUIFontSize(params->font, 24);
 }
 
+static bool _fileSystem(struct GUIParams* params, enum GUIMenuExitReason* result) {
+	static const char* keys[] = { "switch.romDirectory", "savegamePath" };
+	static const char* labels[] = { "ROMs location", "Saves location" };
+	uint32_t input = 0;
+	GUIPollInput(params, &input, NULL);
+	unsigned x, y;
+	bool tapped = _tap(params, &x, &y);
+	if (tapped && _inside(x, y, 48, 664, 180, 56)) input |= 1U << GUI_INPUT_BACK;
+	if (input & ((1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) {
+		*result = GUI_MENU_EXIT_BACK;
+		return true;
+	}
+	if (input & ((1U << GUI_INPUT_UP) | (1U << GUI_INPUT_DOWN))) _fileSystemIndex ^= 1;
+	bool activate = input & (1U << GUI_INPUT_SELECT);
+	if (tapped && _inside(x, y, 400, 160, 808, 192)) {
+		_fileSystemIndex = (y - 160) / 96;
+		activate = true;
+	}
+	if (tapped && _inside(x, y, 850, 664, 380, 56)) activate = true;
+	if (activate) {
+		const char* key = keys[_fileSystemIndex];
+		const char* configured = mCoreConfigGetValue(&_runner->config, key);
+		char old[PATH_MAX], path[PATH_MAX];
+		strlcpy(old, configured ? configured : "", sizeof(old));
+		strlcpy(path, configured ? configured : (_fileSystemIndex ? "" : params->currentPath), sizeof(path));
+		if (path[0] == '/') {
+			char absolute[PATH_MAX];
+			strlcpy(absolute, path, sizeof(absolute));
+			if (snprintf(path, sizeof(path), "sdmc:%s", absolute) >= (int) sizeof(path)) path[0] = 0;
+		}
+		SwkbdConfig keyboard;
+		if (R_SUCCEEDED(swkbdCreate(&keyboard, 0))) {
+			swkbdConfigMakePresetDefault(&keyboard);
+			swkbdConfigSetHeaderText(&keyboard, _fileSystemIndex ? "Save folder (blank: beside each ROM)" : "ROM folder on SD card");
+			swkbdConfigSetInitialText(&keyboard, path);
+			swkbdConfigSetStringLenMax(&keyboard, PATH_MAX - 1);
+			bool accepted = R_SUCCEEDED(swkbdShow(&keyboard, path, sizeof(path)));
+			swkbdClose(&keyboard);
+			if (accepted) {
+				bool valid = !strpbrk(path, "\r\n") && ((*path && !strncmp(path, "sdmc:/", 6)) || (!*path && _fileSystemIndex));
+				struct VDir* directory = valid && *path ? VDirOpen(path) : NULL;
+				if (*path && !directory) valid = false;
+				if (directory) directory->close(directory);
+				if (valid && *path && _fileSystemIndex && access(path, W_OK)) valid = false;
+				if (!valid) {
+					GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Choose an existing sdmc:/ folder. The saves folder must be writable.");
+				} else {
+					/* Keep absolute SD paths compatible with upstream directory options. */
+					mCoreConfigSetValue(&_runner->config, key, *path ? path + 5 : NULL);
+					if (!mCoreConfigSave(&_runner->config)) {
+						mCoreConfigSetValue(&_runner->config, key, *old ? old : NULL);
+						GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save the folder setting. The previous location is unchanged.");
+					} else {
+						if (!_fileSystemIndex) _romDirectoryChanged = true;
+						GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, _fileSystemIndex ?
+						    "Save location updated for the next game launch. Existing saves were not moved. Per-game save folders still take priority." :
+						    "ROM location updated. The library will refresh when you return.");
+					}
+				}
+			}
+		} else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not open the folder keyboard.");
+		GUIInvalidateKeys(params);
+	}
+	params->drawStart();
+	params->guiPrepare();
+	SwitchUIDrawRect(0, 0, 1280, 720, UI_BASE);
+	SwitchUIFontSize(params->font, 30);
+	SwitchUIPrint(params->font, 48, 66, 300, UI_TEXT, "Settings");
+	SwitchUIFontSize(params->font, 22);
+	SwitchUIRoundRect(40, 140, 280, 48, 8, UI_SURFACE);
+	SwitchUIPrint(params->font, 62, 172, 238, UI_FOCUS, "File System");
+	for (unsigned i = 0; i < 2; ++i) {
+		int top = 160 + i * 96;
+		SwitchUIRoundRect(400, top, 808, 84, 8, UI_SURFACE);
+		if (i == _fileSystemIndex) SwitchUIRoundFrame(400, top, 808, 84, 8, UI_FOCUS);
+		SwitchUIFontSize(params->font, 22);
+		SwitchUIPrint(params->font, 420, top + 30, 760, UI_TEXT, labels[i]);
+		const char* value = mCoreConfigGetValue(&_runner->config, keys[i]);
+		if (!value || !*value) value = i ? "Default: beside each ROM" : params->currentPath;
+		SwitchUIFontSize(params->font, 18);
+		SwitchUIPrint(params->font, 420, top + 62, 760, UI_MUTED, value);
+	}
+	SwitchUIPrint(params->font, 420, 398, 760, UI_MUTED, "Enter an existing SD folder, for example sdmc:/roms/gba.");
+	SwitchUIPrint(params->font, 420, 434, 760, UI_MUTED, "Existing files stay in place. Per-game save folders take priority.");
+	SwitchUIHint(params->font, 48, 699, "B", "Back");
+	SwitchUIHint(params->font, 860, 699, "A", "Change folder");
+	SwitchUIFontSize(params->font, 24);
+	params->guiFinish();
+	params->drawEnd();
+	*result = GUI_MENU_CONTINUE;
+	return true;
+}
+
 bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct GUIMenuState* state,
                          enum GUIMenuExitReason* result) {
 	if (_importingArtwork) return false;
+	if (menu == &_fileSystemMenu) return _fileSystem(params, result);
 	if (menu == SwitchUIAchievementsMenu()) return SwitchUIAchievementsRun(params, result);
 	if (menu == SwitchUIUpdatesMenu()) return SwitchUIUpdatesRun(params, result);
 	if (menu == &_interfaceMenu) {
@@ -1213,6 +1310,21 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		return _artwork(params, menu, result);
 	if (!_runner || _runner->core || !menu->title || strcmp(menu->title, "Select file"))
 		return false;
+	if (_romDirectoryChanged) {
+		_romDirectoryChanged = false;
+		const char* location = mCoreConfigGetValue(&_runner->config, "switch.romDirectory");
+		char previous[PATH_MAX];
+		strlcpy(previous, params->currentPath, sizeof(previous));
+		if (location && *location) strlcpy(params->currentPath, location, sizeof(params->currentPath));
+		if (SwitchUIFilesRefreshLibrary(params, menu)) {
+			_library.menu = NULL;
+			_lastSelection = SIZE_MAX;
+			_files = false;
+		} else {
+			strlcpy(params->currentPath, previous, sizeof(params->currentPath));
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not refresh the selected ROM folder. The current library is unchanged.");
+		}
+	}
 	if (_addGames) {
 		_addGames = SwitchUIPlazaRun(params, &_files);
 		if (SwitchUINavigationExitRequested()) { *result = GUI_MENU_EXIT_CANCEL; return true; }
@@ -1698,10 +1810,25 @@ void SwitchUIInit(struct mGUIRunner* runner) {
 	_layout = _layout == 1;
 	_interfaceMenu.title = "Interface";
 	GUIMenuItemListInit(&_interfaceMenu.items, 0);
+	_fileSystemMenu.title = "File System";
+	GUIMenuItemListInit(&_fileSystemMenu.items, 0);
+	_fileSystemIndex = 0;
+	_romDirectoryChanged = false;
+	const char* romDirectory = mCoreConfigGetValue(&runner->config, "switch.romDirectory");
+	if (romDirectory && (romDirectory[0] == '/' || !strncmp(romDirectory, "sdmc:/", 6)) &&
+	    strlen(romDirectory) < sizeof(runner->params.currentPath)) {
+		struct VDir* directory = VDirOpen(romDirectory);
+		if (directory) {
+			directory->close(directory);
+			strlcpy(runner->params.currentPath, romDirectory, sizeof(runner->params.currentPath));
+		}
+	}
 	_settingsMenu.title = "Settings";
-	GUIMenuItemListInit(&_settingsMenu.items, 5);
+	GUIMenuItemListInit(&_settingsMenu.items, 6);
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
 	    (struct GUIMenuItem) { .title = "Interface", .submenu = &_interfaceMenu };
+	*GUIMenuItemListAppend(&_settingsMenu.items) =
+	    (struct GUIMenuItem) { .title = "File System", .submenu = &_fileSystemMenu };
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
 	    (struct GUIMenuItem) { .title = "Artwork (SteamGridDB)", .submenu = &_artworkMenu };
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
@@ -1719,6 +1846,7 @@ void SwitchUIDeinit(void) {
 	SwitchPlazaDeinit();
 	GUIMenuItemListDeinit(&_artworkMenu.items);
 	GUIMenuItemListDeinit(&_interfaceMenu.items);
+	GUIMenuItemListDeinit(&_fileSystemMenu.items);
 	GUIMenuItemListDeinit(&_settingsMenu.items);
 	_clearTextures();
 	free(_library.games);
