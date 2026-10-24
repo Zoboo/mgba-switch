@@ -250,6 +250,117 @@ bool SwitchUIFilesRefreshLibrary(struct GUIParams* params, struct GUIMenu* menu)
 	return ok;
 }
 
+static bool _excludeFiles(const char* name) {
+	UNUSED(name);
+	return false;
+}
+
+bool SwitchUISelectDirectory(struct GUIParams* params, const char* initialPath, char* outPath, size_t outLen) {
+	struct GUIParams browser = *params;
+	strlcpy(browser.currentPath, "sdmc:/", sizeof(browser.currentPath));
+	if (initialPath && !strncmp(initialPath, "sdmc:/", 6)) {
+		strlcpy(browser.currentPath, initialPath, sizeof(browser.currentPath));
+	} else if (initialPath && initialPath[0] == '/') {
+		snprintf(browser.currentPath, sizeof(browser.currentPath), "sdmc:%s", initialPath);
+	}
+	browser.fileIndex = 0;
+	struct GUIMenuItemList folders;
+	GUIMenuItemListInit(&folders, 0);
+	bool accepted = false, refresh = true;
+	size_t selected = 0, first = 0;
+	for (;;) {
+		if (refresh) {
+			if (!_refreshDirectory(&browser, browser.currentPath, &folders, _excludeFiles, NULL, NULL)) {
+				if (!_scanCancelled && strcmp(browser.currentPath, "sdmc:/")) {
+					strlcpy(browser.currentPath, "sdmc:/", sizeof(browser.currentPath));
+					continue;
+				}
+				if (!_scanCancelled) GUIShowMessageBox(&browser, GUI_MESSAGE_BOX_OK, 0, "Could not read the SD card folders.");
+				break;
+			}
+			selected = first = 0;
+			refresh = false;
+		}
+		uint32_t input = 0;
+		GUIPollInput(&browser, &input, NULL);
+		unsigned x = browser.cx, y = browser.cy;
+		bool tapped = GUIPollCursor(&browser, &x, &y) == GUI_CURSOR_CLICKED;
+		if (tapped) { x = browser.cx; y = browser.cy; }
+		if (input & (1U << GUI_INPUT_CANCEL)) break;
+		bool back = input & (1U << GUI_INPUT_BACK);
+		if (tapped && y >= 664 && x < 240) back = true;
+		size_t count = GUIMenuItemListSize(&folders) + 1;
+		if (selected && (input & (1U << GUI_INPUT_UP))) --selected;
+		if (selected + 1 < count && (input & (1U << GUI_INPUT_DOWN))) ++selected;
+		bool previous = (input & (1U << GUI_INPUT_LEFT)) || (tapped && y >= 664 && x >= 280 && x < 540);
+		bool next = (input & (1U << GUI_INPUT_RIGHT)) || (tapped && y >= 664 && x >= 560 && x < 820);
+		if (previous) selected = selected > 8 ? selected - 8 : 0;
+		if (next) selected = selected + 8 < count ? selected + 8 : count - 1;
+		bool activate = input & (1U << GUI_INPUT_SELECT);
+		if (tapped && y >= 664 && x >= 860) activate = true;
+		if (tapped && x >= 48 && x < 1232 && y >= 152 && y < 632) {
+			size_t row = first + (y - 152) / 60;
+			if (row < count) { selected = row; activate = true; }
+		}
+		if (back || (activate && selected == 1)) {
+			if (!strcmp(browser.currentPath, "sdmc:/")) {
+				if (back) break;
+			} else {
+				_upDirectory(browser.currentPath);
+				refresh = true;
+			}
+		} else if (activate && selected == 0) {
+			if (strlen(browser.currentPath) < outLen) {
+				strlcpy(outPath, browser.currentPath, outLen);
+				accepted = true;
+			}
+			break;
+		} else if (activate) {
+			const char* name = GUIMenuItemListGetPointer(&folders, selected - 1)->title;
+			char path[PATH_MAX];
+			size_t len = strlen(browser.currentPath);
+			if (snprintf(path, sizeof(path), "%s%s%s", browser.currentPath,
+			             len && browser.currentPath[len - 1] == '/' ? "" : "/", name) < (int) sizeof(path)) {
+				strlcpy(browser.currentPath, path, sizeof(browser.currentPath));
+				refresh = true;
+			} else GUIShowMessageBox(&browser, GUI_MESSAGE_BOX_OK, 0, "This folder path is too long.");
+		}
+		if (refresh) continue;
+		if (selected < first) first = selected;
+		if (selected >= first + 8) first = selected - 7;
+		browser.drawStart();
+		if (browser.guiPrepare) browser.guiPrepare();
+		SwitchUIDrawRect(0, 0, 1280, 720, 0xFF1F1417);
+		unsigned oldSize = SwitchUIFontSizeGet(browser.font);
+		SwitchUIFontSize(browser.font, 28);
+		SwitchUIPrint(browser.font, 48, 66, 1184, 0xFFFFFFFF, "Choose a directory");
+		SwitchUIFontSize(browser.font, 18);
+		SwitchUIPrint(browser.font, 48, 112, 1184, 0xFFB8B2AA, browser.currentPath);
+		for (size_t row = first; row < count && row < first + 8; ++row) {
+			int top = 152 + (row - first) * 60;
+			if (row == selected) {
+				SwitchUIRoundRect(48, top, 1184, 54, 8, 0xFF332024);
+				SwitchUIRoundFrame(48, top, 1184, 54, 8, 0xFFFFA3BD);
+			}
+			SwitchUIFontSize(browser.font, 22);
+			const char* label = row == 0 ? "Use This Directory" :
+			    row == 1 ? "..  Parent directory" : GUIMenuItemListGetPointer(&folders, row - 1)->title;
+			SwitchUIPrint(browser.font, 68, top + 35, 1120, 0xFFFFFFFF, label);
+		}
+		SwitchUIHint(browser.font, 48, 699, "B", "Back / Cancel");
+		SwitchUIHint(browser.font, 300, 699, "<", "Previous");
+		SwitchUIHint(browser.font, 580, 699, ">", "Next");
+		SwitchUIHint(browser.font, 880, 699, "A", selected ? "Open folder" : "Use This Directory");
+		SwitchUIFontSize(browser.font, oldSize);
+		if (browser.guiFinish) browser.guiFinish();
+		browser.drawEnd();
+	}
+	_cleanFiles(&folders);
+	GUIMenuItemListDeinit(&folders);
+	GUIInvalidateKeys(params);
+	return accepted;
+}
+
 bool GUISelectFile(struct GUIParams* params, char* outPath, size_t outLen, bool (*filterName)(const char* name), bool (*filterContents)(struct VFile*), const char* preselect) {
 	if (!_libraryFiltersSet) {
 		_libraryFilterName = filterName;

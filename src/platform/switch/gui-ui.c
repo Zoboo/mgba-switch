@@ -1192,42 +1192,24 @@ static bool _fileSystem(struct GUIParams* params, enum GUIMenuExitReason* result
 		char old[PATH_MAX], path[PATH_MAX];
 		strlcpy(old, configured ? configured : "", sizeof(old));
 		strlcpy(path, configured ? configured : (_fileSystemIndex ? "" : params->currentPath), sizeof(path));
-		if (path[0] == '/') {
-			char absolute[PATH_MAX];
-			strlcpy(absolute, path, sizeof(absolute));
-			if (snprintf(path, sizeof(path), "sdmc:%s", absolute) >= (int) sizeof(path)) path[0] = 0;
-		}
-		SwkbdConfig keyboard;
-		if (R_SUCCEEDED(swkbdCreate(&keyboard, 0))) {
-			swkbdConfigMakePresetDefault(&keyboard);
-			swkbdConfigSetHeaderText(&keyboard, _fileSystemIndex ? "Save folder (blank: beside each ROM)" : "ROM folder on SD card");
-			swkbdConfigSetInitialText(&keyboard, path);
-			swkbdConfigSetStringLenMax(&keyboard, PATH_MAX - 1);
-			bool accepted = R_SUCCEEDED(swkbdShow(&keyboard, path, sizeof(path)));
-			swkbdClose(&keyboard);
-			if (accepted) {
-				bool valid = !strpbrk(path, "\r\n") && ((*path && !strncmp(path, "sdmc:/", 6)) || (!*path && _fileSystemIndex));
-				struct VDir* directory = valid && *path ? VDirOpen(path) : NULL;
-				if (*path && !directory) valid = false;
-				if (directory) directory->close(directory);
-				if (valid && *path && _fileSystemIndex && access(path, W_OK)) valid = false;
-				if (!valid) {
-					GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Choose an existing sdmc:/ folder. The saves folder must be writable.");
+		if (SwitchUISelectDirectory(params, *path ? path : params->currentPath, path, sizeof(path))) {
+			bool valid = !strncmp(path, "sdmc:/", 6) && (!_fileSystemIndex || !access(path, W_OK));
+			if (!valid) {
+				GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "The selected saves folder must be writable.");
+			} else {
+				/* Keep absolute SD paths compatible with upstream directory options. */
+				mCoreConfigSetValue(&_runner->config, key, path + 5);
+				if (!mCoreConfigSave(&_runner->config)) {
+					mCoreConfigSetValue(&_runner->config, key, *old ? old : NULL);
+					GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save the folder setting. The previous location is unchanged.");
 				} else {
-					/* Keep absolute SD paths compatible with upstream directory options. */
-					mCoreConfigSetValue(&_runner->config, key, *path ? path + 5 : NULL);
-					if (!mCoreConfigSave(&_runner->config)) {
-						mCoreConfigSetValue(&_runner->config, key, *old ? old : NULL);
-						GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save the folder setting. The previous location is unchanged.");
-					} else {
-						if (!_fileSystemIndex) _romDirectoryChanged = true;
-						GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, _fileSystemIndex ?
-						    "Save location updated for the next game launch. Existing saves were not moved. Per-game save folders still take priority." :
-						    "ROM location updated. The library will refresh when you return.");
-					}
+					if (!_fileSystemIndex) _romDirectoryChanged = true;
+					GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, _fileSystemIndex ?
+					    "Save location updated for the next game launch. Existing saves were not moved. Per-game save folders still take priority." :
+					    "ROM location updated. The library will refresh when you return.");
 				}
 			}
-		} else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not open the folder keyboard.");
+		}
 		GUIInvalidateKeys(params);
 	}
 	params->drawStart();
@@ -1249,7 +1231,7 @@ static bool _fileSystem(struct GUIParams* params, enum GUIMenuExitReason* result
 		SwitchUIFontSize(params->font, 18);
 		SwitchUIPrint(params->font, 420, top + 62, 760, UI_MUTED, value);
 	}
-	SwitchUIPrint(params->font, 420, 398, 760, UI_MUTED, "Enter an existing SD folder, for example sdmc:/roms/gba.");
+	SwitchUIPrint(params->font, 420, 398, 760, UI_MUTED, "Browse SD folders, then choose Use This Directory.");
 	SwitchUIPrint(params->font, 420, 434, 760, UI_MUTED, "Existing files stay in place. Per-game save folders take priority.");
 	SwitchUIHint(params->font, 48, 699, "B", "Back");
 	SwitchUIHint(params->font, 860, 699, "A", "Change folder");
