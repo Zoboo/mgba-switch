@@ -261,7 +261,8 @@ bool SwitchUISelectDirectory(struct GUIParams* params, const char* initialPath, 
 	if (initialPath && !strncmp(initialPath, "sdmc:/", 6)) {
 		strlcpy(browser.currentPath, initialPath, sizeof(browser.currentPath));
 	} else if (initialPath && initialPath[0] == '/') {
-		snprintf(browser.currentPath, sizeof(browser.currentPath), "sdmc:%s", initialPath);
+		if (snprintf(browser.currentPath, sizeof(browser.currentPath), "sdmc:%s", initialPath) >= (int) sizeof(browser.currentPath))
+			strlcpy(browser.currentPath, "sdmc:/", sizeof(browser.currentPath));
 	}
 	browser.fileIndex = 0;
 	struct GUIMenuItemList folders;
