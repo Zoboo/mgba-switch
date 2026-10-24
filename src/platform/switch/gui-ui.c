@@ -41,6 +41,8 @@ static struct GUIMenu _artworkMenu;
 static struct GUIMenu _interfaceMenu, _fileSystemMenu, _settingsMenu;
 static unsigned _fileSystemIndex;
 static bool _romDirectoryChanged;
+static struct GUIMenu _romLibraryMenu;
+static bool _romLibraryDirty;
 static unsigned _layout;
 static struct {
 	const struct GUIMenu* menu;
@@ -261,6 +263,10 @@ static bool _image(const char* rom, bool banner, int x, int y, int w, int h) {
 }
 
 static void _path(struct GUIParams* params, const char* name, char* path, size_t size) {
+	if (name[0] == '/' || !strncmp(name, "sdmc:/", 6)) {
+		strlcpy(path, name, size);
+		return;
+	}
 	size_t len = strlen(params->currentPath);
 	snprintf(path, size, "%s%s%s", params->currentPath, len && params->currentPath[len - 1] != '/' ? "/" : "", name);
 }
@@ -306,8 +312,10 @@ static bool _matches(const struct GUIMenuItem* item) {
 }
 
 void SwitchUIBeginMenu(const struct GUIMenu* menu) {
-	if (menu->title && !strcmp(menu->title, "Select file"))
+	if (menu->title && !strcmp(menu->title, "Select file")) {
 		_library.menu = NULL;
+		_romLibraryDirty = true;
+	}
 }
 
 static bool _indexLibrary(struct GUIParams* params, const struct GUIMenu* menu) {
@@ -347,7 +355,8 @@ static size_t _position(size_t index, const size_t* entries, size_t count) {
 }
 
 static void _title(const struct GUIMenuItem* item, char* out, size_t size) {
-	strlcpy(out, item->title, size);
+	const char* name = GUIVariantCompareUInt(item->data, VFS_FILE) ? strrchr(item->title, '/') : NULL;
+	strlcpy(out, name ? name + 1 : item->title, size);
 	if (!strcmp(out, "(Up)")) {
 		strlcpy(out, "Parent directory", size);
 		return;
@@ -1167,9 +1176,45 @@ static void _libraryFooter(struct GUIParams* params, bool files, const char* act
 	SwitchUIFontSize(params->font, 24);
 }
 
+static struct GUIMenu* _activeLibrary(struct GUIParams* params, struct GUIMenu* files) {
+	if (_romDirectoryChanged) {
+		_romDirectoryChanged = false;
+		_romLibraryDirty = true;
+	}
+	const char* roots[16];
+	size_t count = SwitchUIRomDirectoriesGet(&_runner->config, roots, 16);
+	if (_files || !count) return files;
+	if (_romLibraryDirty) {
+		_romLibraryDirty = false;
+		char selected[PATH_MAX] = {0};
+		const char* previous = mCoreConfigGetValue(&_runner->config, "lastGame");
+		if (_romLibraryMenu.index < GUIMenuItemListSize(&_romLibraryMenu.items)) {
+			const struct GUIMenuItem* item = GUIMenuItemListGetConstPointer(&_romLibraryMenu.items, _romLibraryMenu.index);
+			if (GUIVariantCompareUInt(item->data, VFS_FILE)) previous = item->title;
+		}
+		if (previous) strlcpy(selected, previous, sizeof(selected));
+		struct GUIParams scan = *params;
+		scan.fileIndex = _romLibraryMenu.index;
+		size_t skipped = 0;
+		if (!SwitchUIFilesRefreshRoots(&scan, &_romLibraryMenu, roots, count, &skipped)) {
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "ROM library refresh stopped. Previous results were kept. Open ROM directories to retry.");
+		} else if (skipped) {
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "%zu ROM directories could not be read and were skipped. Check them in File System settings.", skipped);
+		}
+		for (size_t i = 1; *selected && i < GUIMenuItemListSize(&_romLibraryMenu.items); ++i) {
+			const char* path = GUIMenuItemListGetConstPointer(&_romLibraryMenu.items, i)->title;
+			const char* match = !strncmp(selected, "sdmc:/", 6) ? selected + 5 : selected;
+			if (!strncmp(path, "sdmc:/", 6)) path += 5;
+			if (!strcmp(path, match)) { _romLibraryMenu.index = i; break; }
+		}
+		_library.menu = NULL;
+		_lastSelection = SIZE_MAX;
+	}
+	return &_romLibraryMenu;
+}
 static bool _fileSystem(struct GUIParams* params, enum GUIMenuExitReason* result) {
 	static const char* keys[] = { "switch.romDirectory", "savegamePath" };
-	static const char* labels[] = { "ROMs location", "Saves location" };
+	static const char* labels[] = { "ROM directories", "Saves location" };
 	uint32_t input = 0;
 	GUIPollInput(params, &input, NULL);
 	unsigned x, y;
@@ -1186,7 +1231,10 @@ static bool _fileSystem(struct GUIParams* params, enum GUIMenuExitReason* result
 		activate = true;
 	}
 	if (tapped && _inside(x, y, 850, 664, 380, 56)) activate = true;
-	if (activate) {
+	if (activate && !_fileSystemIndex) {
+		if (SwitchUIRomDirectoriesEdit(params, &_runner->config)) _romDirectoryChanged = true;
+		GUIInvalidateKeys(params);
+	} else if (activate) {
 		const char* key = keys[_fileSystemIndex];
 		const char* configured = mCoreConfigGetValue(&_runner->config, key);
 		char old[PATH_MAX], path[PATH_MAX];
@@ -1227,6 +1275,13 @@ static bool _fileSystem(struct GUIParams* params, enum GUIMenuExitReason* result
 		SwitchUIFontSize(params->font, 22);
 		SwitchUIPrint(params->font, 420, top + 30, 760, UI_TEXT, labels[i]);
 		const char* value = mCoreConfigGetValue(&_runner->config, keys[i]);
+		char count[48];
+		if (!i) {
+			const char* roots[16];
+			size_t total = SwitchUIRomDirectoriesGet(&_runner->config, roots, 16);
+			snprintf(count, sizeof(count), "%zu configured %s", total, total == 1 ? "folder" : "folders");
+			value = total ? count : "Default: upstream file browser";
+		}
 		if (!value || !*value) value = i ? "Default: beside each ROM" : params->currentPath;
 		SwitchUIFontSize(params->font, 18);
 		SwitchUIPrint(params->font, 420, top + 62, 760, UI_MUTED, value);
@@ -1292,20 +1347,12 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		return _artwork(params, menu, result);
 	if (!_runner || _runner->core || !menu->title || strcmp(menu->title, "Select file"))
 		return false;
+	struct GUIMenu* fileMenu = menu;
 	if (_romDirectoryChanged) {
 		_romDirectoryChanged = false;
-		const char* location = mCoreConfigGetValue(&_runner->config, "switch.romDirectory");
-		char previous[PATH_MAX];
-		strlcpy(previous, params->currentPath, sizeof(previous));
-		if (location && *location) strlcpy(params->currentPath, location, sizeof(params->currentPath));
-		if (SwitchUIFilesRefreshLibrary(params, menu)) {
-			_library.menu = NULL;
-			_lastSelection = SIZE_MAX;
-			_files = false;
-		} else {
-			strlcpy(params->currentPath, previous, sizeof(params->currentPath));
-			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not refresh the selected ROM folder. The current library is unchanged.");
-		}
+		_romLibraryDirty = true;
+		_library.menu = NULL;
+		_lastSelection = SIZE_MAX;
 	}
 	if (_addGames) {
 		_addGames = SwitchUIPlazaRun(params, &_files);
@@ -1314,6 +1361,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 			struct SwitchPlazaState plaza;
 			SwitchPlazaGetState(&plaza);
 			if (_plazaInstalled != plaza.installedRevision) {
+				_romLibraryDirty = true;
 				_plazaInstalled = plaza.installedRevision;
 				if (SwitchUIFilesRefreshLibrary(params, menu)) {
 					_library.menu = NULL;
@@ -1326,6 +1374,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	struct SwitchPlazaState plaza;
 	SwitchPlazaGetState(&plaza);
 	if (!_pickerPhase && !_gameSettingsOpen && _plazaInstalled != plaza.installedRevision) {
+		_romLibraryDirty = true;
 		_plazaInstalled = plaza.installedRevision;
 		if (SwitchUIFilesRefreshLibrary(params, menu)) {
 			_library.menu = NULL;
@@ -1337,6 +1386,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		SwitchArtworkSetDownloads(_covers, _banners);
 		_inLibrary = true;
 	}
+	menu = _activeLibrary(params, fileMenu);
 	if (!_indexLibrary(params, menu))
 		return false;
 	padUpdate(&_pad);
@@ -1427,6 +1477,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	}
 	if (cycleFilter)
 		_filter = (_filter + 1) % 4;
+	menu = _activeLibrary(params, fileMenu);
 	if (!_indexLibrary(params, menu))
 		return false;
 	if (buttons & HidNpadButton_Plus) {
@@ -1539,7 +1590,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	    ((buttons & (HidNpadButton_ZL | HidNpadButton_Minus)) || (tapped && _inside(cx, cy, 232, 30, 136, 44)))) {
 		char rom[PATH_MAX];
 		_path(params, selected->title, rom, sizeof(rom));
-		strlcpy(_pickerQuery, selected->title, sizeof(_pickerQuery));
+		const char* filename = strrchr(selected->title, '/');
+		strlcpy(_pickerQuery, filename ? filename + 1 : selected->title, sizeof(_pickerQuery));
 		char* extension = strrchr(_pickerQuery, '.');
 		if (extension) *extension = 0;
 		_pickerOpen(params, rom, false);
@@ -1796,6 +1848,9 @@ void SwitchUIInit(struct mGUIRunner* runner) {
 	GUIMenuItemListInit(&_fileSystemMenu.items, 0);
 	_fileSystemIndex = 0;
 	_romDirectoryChanged = false;
+	_romLibraryDirty = true;
+	_romLibraryMenu.title = "ROM library";
+	GUIMenuItemListInit(&_romLibraryMenu.items, 0);
 	const char* romDirectory = mCoreConfigGetValue(&runner->config, "switch.romDirectory");
 	if (romDirectory && (romDirectory[0] == '/' || !strncmp(romDirectory, "sdmc:/", 6)) &&
 	    strlen(romDirectory) < sizeof(runner->params.currentPath)) {
@@ -1829,6 +1884,9 @@ void SwitchUIDeinit(void) {
 	GUIMenuItemListDeinit(&_artworkMenu.items);
 	GUIMenuItemListDeinit(&_interfaceMenu.items);
 	GUIMenuItemListDeinit(&_fileSystemMenu.items);
+	for (size_t i = 1; i < GUIMenuItemListSize(&_romLibraryMenu.items); ++i)
+		free((char*) GUIMenuItemListGetPointer(&_romLibraryMenu.items, i)->title);
+	GUIMenuItemListDeinit(&_romLibraryMenu.items);
 	GUIMenuItemListDeinit(&_settingsMenu.items);
 	_clearTextures();
 	free(_library.games);

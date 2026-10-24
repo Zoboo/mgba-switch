@@ -111,7 +111,8 @@ void SwitchUINavigationDraw(struct GUIParams* params, unsigned current) {
 }
 
 static void _gameTitle(const struct GUIMenuItem* entry, char* title, size_t size) {
-	strlcpy(title, entry->title, size);
+	const char* name = strrchr(entry->title, '/');
+	strlcpy(title, name ? name + 1 : entry->title, size);
 	char* dot = strrchr(title, '.');
 	if (dot)
 		*dot = 0;

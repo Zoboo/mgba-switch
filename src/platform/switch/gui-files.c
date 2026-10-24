@@ -19,6 +19,8 @@ struct ScanJob {
 	struct ScanJob* next;
 	struct GUIMenuItemList files;
 	char path[PATH_MAX], preselect[PATH_MAX];
+	char (*roots)[PATH_MAX];
+	size_t rootCount, skipped;
 	bool (*filterName)(const char*);
 	bool (*filterContents)(struct VFile*);
 	size_t index, scanned;
@@ -56,6 +58,15 @@ static void _upDirectory(char* currentPath) {
 
 static int _strpcmp(const void* a, const void* b) {
 	return strcasecmp(((const struct GUIMenuItem*) a)->title, ((const struct GUIMenuItem*) b)->title);
+}
+
+static int _libraryCompare(const void* a, const void* b) {
+	const char* left = ((const struct GUIMenuItem*) a)->title;
+	const char* right = ((const struct GUIMenuItem*) b)->title;
+	const char* leftName = strrchr(left, '/');
+	const char* rightName = strrchr(right, '/');
+	int result = strcasecmp(leftName ? leftName + 1 : left, rightName ? rightName + 1 : right);
+	return result ? result : strcmp(left, right);
 }
 
 static struct GUIMenuItem* _appendFile(struct ScanJob* job) {
@@ -155,9 +166,55 @@ static bool _scanDirectory(struct ScanJob* job) {
 	return true;
 }
 
+static bool _scanRoots(struct ScanJob* job) {
+	struct GUIMenuItem* slot = _appendFile(job);
+	if (!slot) return false;
+	*slot = (struct GUIMenuItem) { .title = "(Up)" };
+	size_t scanned = 0;
+	for (size_t root = 0; root < job->rootCount; ++root) {
+		struct VDir* dir = VDirOpen(job->roots[root]);
+		if (!dir) { ++job->skipped; continue; }
+		struct VDirEntry* de;
+		while ((de = dir->listNext(dir))) {
+			__atomic_store_n(&job->scanned, ++scanned, __ATOMIC_RELAXED);
+			if (__atomic_load_n(&job->cancel, __ATOMIC_RELAXED)) { dir->close(dir); return false; }
+			const char* name = de->name(de);
+			if (name[0] == '.' || de->type(de) != VFS_FILE || (job->filterName && !job->filterName(name))) continue;
+			if (job->filterContents) {
+				struct VFile* vf = dir->openFile(dir, name, O_RDONLY);
+				if (!vf) continue;
+				bool matches = job->filterContents(vf);
+				vf->close(vf);
+				if (!matches) continue;
+			}
+			char path[PATH_MAX];
+			size_t len = strlen(job->roots[root]);
+			if (snprintf(path, sizeof(path), "%s%s%s", job->roots[root], len && job->roots[root][len - 1] == '/' ? "" : "/", name) >= (int) sizeof(path)) {
+				job->failed = true; dir->close(dir); return false;
+			}
+			char* title = strdup(path);
+			if (!title) { job->failed = true; dir->close(dir); return false; }
+			slot = _appendFile(job);
+			if (!slot) { free(title); dir->close(dir); return false; }
+			*slot = (struct GUIMenuItem) { .title = title, .data = GUI_V_U(VFS_FILE) };
+		}
+		dir->close(dir);
+	}
+	struct GUIMenuItemList* files = &job->files;
+	if (files->size > 2) qsort(files->vector + 1, files->size - 1, sizeof(*files->vector), _libraryCompare);
+	size_t output = 1;
+	for (size_t input = 1; input < files->size; ++input) {
+		if (output > 1 && !strcmp(files->vector[output - 1].title, files->vector[input].title)) {
+			free((char*) files->vector[input].title);
+		} else files->vector[output++] = files->vector[input];
+	}
+	files->size = output;
+	return true;
+}
+
 static void _scanWorker(void* context) {
 	struct ScanJob* job = context;
-	job->success = _scanDirectory(job);
+	job->success = job->roots ? _scanRoots(job) : _scanDirectory(job);
 	__atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
 }
 
@@ -172,6 +229,7 @@ static void _reapJobs(bool shutdown) {
 		_cleanFiles(&job->files);
 		GUIMenuItemListDeinit(&job->files);
 		*link = job->next;
+		free(job->roots);
 		free(job);
 	}
 }
@@ -203,7 +261,7 @@ static bool _scanFrame(struct GUIParams* params, const char* currentPath, struct
 	return true;
 }
 
-static bool _refreshDirectory(struct GUIParams* params, const char* currentPath, struct GUIMenuItemList* files, bool (*filterName)(const char*), bool (*filterContents)(struct VFile*), const char* preselect) {
+static bool _refreshFiles(struct GUIParams* params, const char* currentPath, struct GUIMenuItemList* files, bool (*filterName)(const char*), bool (*filterContents)(struct VFile*), const char* preselect, const char* const* roots, size_t rootCount, size_t* skipped) {
 	_scanCancelled = false;
 	_reapJobs(false);
 	while (_jobs && _jobs->next) {
@@ -212,18 +270,28 @@ static bool _refreshDirectory(struct GUIParams* params, const char* currentPath,
 	}
 	struct ScanJob* job = calloc(1, sizeof(*job));
 	if (!job) { _scanCancelled = true; return false; }
+	if (roots) {
+		if (!rootCount || rootCount > 16) { free(job); return false; }
+		job->roots = calloc(rootCount, sizeof(*job->roots));
+		if (!job->roots) { free(job); _scanCancelled = true; return false; }
+		job->rootCount = rootCount;
+		for (size_t i = 0; i < rootCount; ++i) {
+			if (!roots[i] || strlen(roots[i]) >= PATH_MAX) { free(job->roots); free(job); return false; }
+			strlcpy(job->roots[i], roots[i], PATH_MAX);
+		}
+	}
 	strlcpy(job->path, currentPath, sizeof(job->path));
 	if (preselect) strlcpy(job->preselect, preselect, sizeof(job->preselect));
 	job->index = params->fileIndex;
 	job->filterName = filterName;
 	job->filterContents = filterContents;
 	GUIMenuItemListInit(&job->files, 0);
-	if (!job->files.vector) { free(job); _scanCancelled = true; return false; }
+	if (!job->files.vector) { free(job->roots); free(job); _scanCancelled = true; return false; }
 	if (R_FAILED(threadCreate(&job->thread, _scanWorker, job, NULL, 128 * 1024, 0x3B, -2))) {
-		GUIMenuItemListDeinit(&job->files); free(job); _scanCancelled = true; return false;
+		GUIMenuItemListDeinit(&job->files); free(job->roots); free(job); _scanCancelled = true; return false;
 	}
 	if (R_FAILED(threadStart(&job->thread))) {
-		threadClose(&job->thread); GUIMenuItemListDeinit(&job->files); free(job); _scanCancelled = true; return false;
+		threadClose(&job->thread); GUIMenuItemListDeinit(&job->files); free(job->roots); free(job); _scanCancelled = true; return false;
 	}
 	job->next = _jobs;
 	_jobs = job;
@@ -233,6 +301,7 @@ static bool _refreshDirectory(struct GUIParams* params, const char* currentPath,
 	bool success = job->success;
 	_scanCancelled = job->failed;
 	if (success) {
+		if (skipped) *skipped = job->skipped;
 		_cleanFiles(files);
 		GUIMenuItemListDeinit(files);
 		*files = job->files;
@@ -241,6 +310,18 @@ static bool _refreshDirectory(struct GUIParams* params, const char* currentPath,
 	}
 	_reapJobs(false);
 	return success;
+}
+
+static bool _refreshDirectory(struct GUIParams* params, const char* currentPath, struct GUIMenuItemList* files, bool (*filterName)(const char*), bool (*filterContents)(struct VFile*), const char* preselect) {
+	return _refreshFiles(params, currentPath, files, filterName, filterContents, preselect, NULL, 0, NULL);
+}
+
+bool SwitchUIFilesRefreshRoots(struct GUIParams* params, struct GUIMenu* menu, const char* const* roots, size_t rootCount, size_t* skipped) {
+	if (skipped) *skipped = 0;
+	bool ok = roots && _refreshFiles(params, "Configured ROM directories", &menu->items, _libraryFilterName, _libraryFilterContents, NULL, roots, rootCount, skipped);
+	if (ok) menu->index = params->fileIndex < GUIMenuItemListSize(&menu->items) ? params->fileIndex : 0;
+	GUIInvalidateKeys(params);
+	return ok;
 }
 
 bool SwitchUIFilesRefreshLibrary(struct GUIParams* params, struct GUIMenu* menu) {
@@ -394,6 +475,13 @@ bool GUISelectFile(struct GUIParams* params, char* outPath, size_t outLen, bool 
 			break;
 		}
 		if (reason == GUI_MENU_EXIT_ACCEPT) {
+			if (item && GUIVariantCompareUInt(item->data, VFS_FILE) && (item->title[0] == '/' || !strncmp(item->title, "sdmc:/", 6))) {
+				bool fits = strlen(item->title) < outLen;
+				if (fits) strlcpy(outPath, item->title, outLen);
+				_cleanFiles(&menu.items);
+				GUIMenuItemListDeinit(&menu.items);
+				return fits;
+			}
 			if (params->fileIndex == 0) {
 				if (strncmp(params->currentPath, params->basePath, PATH_MAX) == 0) {
 					continue;

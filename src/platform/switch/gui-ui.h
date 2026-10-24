@@ -7,11 +7,15 @@
 #include <mgba-util/gui/menu.h>
 
 struct mGUIRunner;
+struct mCoreConfig;
 struct GUIFont;
 void SwitchUIInit(struct mGUIRunner* runner);
 void SwitchUIDeinit(void);
 void SwitchUIFilesDeinit(void);
 bool SwitchUIFilesRefreshLibrary(struct GUIParams*, struct GUIMenu*);
+bool SwitchUIFilesRefreshRoots(struct GUIParams*, struct GUIMenu*, const char* const*, size_t, size_t* skipped);
+size_t SwitchUIRomDirectoriesGet(const struct mCoreConfig*, const char**, size_t capacity);
+bool SwitchUIRomDirectoriesEdit(struct GUIParams*, struct mCoreConfig*);
 bool SwitchUISelectDirectory(struct GUIParams*, const char* initialPath, char* outPath, size_t outLen);
 bool SwitchUIPlazaRun(struct GUIParams*, bool* files);
 void SwitchUIAchievementsInit(struct mGUIRunner*, const char* directory);
