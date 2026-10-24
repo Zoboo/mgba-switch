@@ -50,6 +50,12 @@ static struct {
 	unsigned filter;
 } _library;
 static float _scroll;
+static struct {
+	bool down, tracking, dragging, suppressTap;
+	unsigned startX, lastX, finger;
+	float velocity;
+	u64 sampled;
+} _swipe;
 static size_t _lastSelection = SIZE_MAX;
 static struct {
 	char path[PATH_MAX];
@@ -459,6 +465,74 @@ static bool _tap(struct GUIParams* params, unsigned* x, unsigned* y) {
 		*y = params->cy;
 	}
 	return tapped;
+}
+
+static bool _carouselTouch(size_t count, size_t* position, bool enabled, bool* tapped) {
+	HidTouchScreenState touch = {0};
+	hidGetTouchScreenStates(&touch, 1);
+	u64 now = armTicksToNs(armGetSystemTick());
+	float elapsed = _swipe.sampled ? (now - _swipe.sampled) / 1000000000.f : 0.f;
+	_swipe.sampled = now;
+	if (elapsed > .1f) {
+		elapsed = 0.f;
+		_swipe.velocity = 0.f;
+		if (_swipe.dragging) _swipe.suppressTap = true;
+		_swipe.tracking = _swipe.dragging = false;
+	}
+	bool down = touch.count == 1;
+	if (!touch.count && _swipe.suppressTap) {
+		*tapped = false;
+		_swipe.suppressTap = false;
+	}
+	if (!enabled || !count) {
+		if (_swipe.dragging && touch.count) _swipe.suppressTap = true;
+		_swipe.tracking = _swipe.dragging = false;
+		_swipe.velocity = 0.f;
+		_swipe.down = touch.count != 0;
+		return false;
+	}
+	if (down && !_swipe.down) {
+		_swipe.velocity = 0.f;
+		_swipe.startX = _swipe.lastX = touch.touches[0].x;
+		_swipe.finger = touch.touches[0].finger_id;
+		_swipe.tracking = _inside(touch.touches[0].x, touch.touches[0].y, 88, 230, 1144, 375);
+		_swipe.dragging = false;
+	}
+	bool moving = false;
+	if (down && _swipe.tracking && touch.touches[0].finger_id == _swipe.finger) {
+		unsigned x = touch.touches[0].x;
+		if (abs((int) x - (int) _swipe.startX) > 10) _swipe.dragging = true;
+		if (_swipe.dragging) {
+			float delta = ((int) _swipe.lastX - (int) x) / (_layout ? 254.f : 224.f);
+			_scroll += delta;
+			if (elapsed > 0.f) {
+				float speed = fmaxf(-24.f, fminf(delta / elapsed, 24.f));
+				float weight = 1.f - expf(-elapsed * 25.f);
+				_swipe.velocity += (speed - _swipe.velocity) * weight;
+			}
+			moving = true;
+		}
+		_swipe.lastX = x;
+	} else {
+		if (_swipe.dragging) *tapped = false;
+		if (_swipe.dragging && touch.count) _swipe.suppressTap = true;
+		if (touch.count) _swipe.velocity = 0.f;
+		_swipe.tracking = _swipe.dragging = false;
+		if (fabsf(_swipe.velocity) > .08f) {
+			_scroll += _swipe.velocity * elapsed;
+			_swipe.velocity *= expf(-5.f * elapsed);
+			moving = true;
+		} else _swipe.velocity = 0.f;
+	}
+	_swipe.down = touch.count != 0;
+	if (moving) {
+		float limit = (float) (count - 1);
+		if (_scroll <= 0.f || _scroll >= limit) _swipe.velocity = 0.f;
+		_scroll = fmaxf(0.f, fminf(_scroll, limit));
+		*position = (size_t) floorf(_scroll + .5f);
+		*tapped = false;
+	}
+	return moving;
 }
 
 static void _artworkProgress(struct GUIParams* params, const struct SwitchArtworkState* status) {
@@ -1171,6 +1245,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	GUIPollInput(params, &input, NULL);
 	unsigned cx, cy;
 	bool tapped = _tap(params, &cx, &cy);
+	if (_swipe.dragging || _swipe.suppressTap) tapped = false;
+	bool carouselBlocked = _pickerPhase || _gameSettingsOpen;
 	if (_pickerInput(params, _focusPath, input, buttons, tapped, cx, cy) ||
 	    _gameSettingsInput(params, input, tapped, cx, cy)) {
 		input = 0;
@@ -1185,6 +1261,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		if (shortcut) input |= 1U << GUI_INPUT_LEFT;
 		int navigation = SwitchUINavigationInput(params, _files ? 1 : 0, enter, input, tapped, cx, cy);
 		if (navigation != -1) {
+			carouselBlocked = true;
 			input = 0; buttons = 0; tapped = false;
 			if (navigation == 0 || navigation == 1) { _files = navigation == 1; _lastSelection = SIZE_MAX; }
 			if (navigation == 2) SwitchUIOpenSettings(params);
@@ -1278,11 +1355,16 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		if (buttons & HidNpadButton_L) position = 0;
 		if (buttons & HidNpadButton_R) position = count - 1;
 	}
-	if (_lastSelection == SIZE_MAX || fabsf(_scroll - (float) position) > 3.f)
+	if (_lastSelection == SIZE_MAX || (fabsf(_scroll - (float) position) > 3.f &&
+	    (input || buttons || (!_swipe.dragging && !_swipe.velocity))))
 		_scroll = position;
-	_scroll += ((float) position - _scroll) * 0.22f;
-	if (fabsf(_scroll - position) < 0.002f)
-		_scroll = position;
+	bool swiping = _carouselTouch(count, &position, !_files && !carouselBlocked && !input && !buttons && !cycleFilter &&
+	    _lastSelection != SIZE_MAX, &tapped);
+	if (!swiping) {
+		_scroll += ((float) position - _scroll) * 0.22f;
+		if (fabsf(_scroll - position) < 0.002f)
+			_scroll = position;
+	}
 	if (_files) {
 		if (position < state->start)
 			state->start = position;
@@ -1297,28 +1379,36 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		}
 	} else if (tapped) {
 		if (_layout && count) {
-			unsigned shown = count - position < 5 ? count - position : 5;
-			for (unsigned slot = 0; slot < shown; ++slot) {
-				int left = slot ? 374 + (slot - 1) * 244 : 104;
-				if (_inside(cx, cy, left, slot ? 268 : 250, slot ? 224 : 248, slot ? 336 : 368)) {
-					if (!slot)
+			int first = (int) floorf(_scroll) - 1;
+			for (int ordinal = first; ordinal < first + 7; ++ordinal) {
+				if (ordinal < 0 || (size_t) ordinal >= count) continue;
+				bool selected = (size_t) ordinal == position;
+				int left = 104 + (ordinal - _scroll) * 254;
+				int right = left + (selected ? 248 : 224);
+				if (left < 72) left = 72;
+				if (right > left && _inside(cx, cy, left, selected ? 250 : 268, right - left, selected ? 368 : 336)) {
+					if (selected)
 						input |= 1U << GUI_INPUT_SELECT;
-					position += slot;
+					position = ordinal;
 					break;
 				}
 			}
 			if (_inside(cx, cy, 104, 638, 240, 24))
 				input |= 1U << GUI_INPUT_SELECT;
 		} else {
-			float center = count < 5 ? ((float) count - 1) / 2.f : _scroll;
-			int first = count < 5 ? 0 : (int) floorf(_scroll + .5f) - 2;
-			unsigned shown = count < 5 ? count : 5;
+			float center = _scroll;
+			int first = (int) floorf(_scroll + .5f) - 2;
+			unsigned shown = 5;
 			for (unsigned slot = 0; slot < shown; ++slot) {
 				int ordinal = first + slot;
 				if (ordinal < 0 || (size_t) ordinal >= count) continue;
 				size_t index = ordinal;
-				int x = 528 + (ordinal - center) * 224;
-				if (_inside(cx, cy, x, 248, 224, 336)) {
+				float distance = fminf(fabsf(ordinal - _scroll), 1.f);
+				int w = 224 - distance * 20, h = w * 3 / 2;
+				int x = 640 + (ordinal - center) * 224 - w / 2, y = 248 + (336 - h) / 2;
+				if (x < 72) { w -= 72 - x; x = 72; }
+				if (w <= 0) continue;
+				if (_inside(cx, cy, x, y, w, h)) {
 					if (index == position)
 						input |= 1U << GUI_INPUT_SELECT;
 					position = index;
@@ -1446,15 +1536,15 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		             *_platform(selected->title)   ? _platform(selected->title) :
 		                 _archive(selected->title) ? "Archive" :
 		                                             "Game");
-		float center = count < 5 ? ((float) count - 1) / 2.f : _scroll;
-		int first = count < 5 ? 0 : (int) floorf(_scroll + .5f) - 2;
-		unsigned shown = count < 5 ? count : 5;
+		float center = _scroll;
+		int first = (int) floorf(_scroll + .5f) - 2;
+		unsigned shown = 5;
 		for (unsigned slot = 0; slot < shown; ++slot) {
 			int ordinal = first + slot;
 			if (ordinal < 0 || (size_t) ordinal >= count) continue;
 			size_t index = ordinal;
 			const struct GUIMenuItem* entry = GUIMenuItemListGetConstPointer(&menu->items, entries[index]);
-			float distance = count < 5 ? (index == position ? 0 : 1) : fminf(fabsf(ordinal - _scroll), 1.f);
+			float distance = fminf(fabsf(ordinal - _scroll), 1.f);
 			int w = 224 - distance * 20, h = w * 3 / 2;
 			int x = 640 + (ordinal - center) * 224 - w / 2, y = 248 + (336 - h) / 2;
 			if (x + w <= 0 || x >= 1280)
@@ -1626,9 +1716,4 @@ void SwitchUIDeinit(void) {
 	free(_library.games);
 	free(_library.files);
 	memset(&_library, 0, sizeof(_library));
-	glDeleteTextures(1, &_white);
-	glDeleteBuffers(1, &_vbo);
-	glDeleteVertexArrays(1, &_vao);
-	glDeleteProgram(_program);
-	_runner = NULL;
-}
+	glDeleteTexture

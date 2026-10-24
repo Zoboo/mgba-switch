@@ -113,7 +113,6 @@ static void _gameTitle(const struct GUIMenuItem* entry, char* title, size_t size
 
 void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, const size_t* entries, size_t count,
                          size_t position, float scroll) {
-	(void) scroll;
 	struct GUIFont* font = params->font;
 	unsigned oldSize = SwitchUIFontSizeGet(font);
 
@@ -131,18 +130,21 @@ void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, c
 		                                                         "Game archive";
 		SwitchUIFontSize(font, 20);
 		GUIFontPrint(font, 700, 164, GUI_ALIGN_HCENTER, CONSOLE_MUTED, platform);
-		unsigned shown = count - position < 5 ? count - position : 5;
-		for (unsigned slot = 0; slot < shown; ++slot) {
-			size_t index = position + slot;
+		int first = (int) scroll - 1;
+		for (int ordinal = first; ordinal < first + 7; ++ordinal) {
+			if (ordinal < 0 || (size_t) ordinal >= count) continue;
+			size_t index = ordinal;
 			const struct GUIMenuItem* entry = GUIMenuItemListGetConstPointer(&menu->items, entries[index]);
-			int x = slot ? 374 + ((int) slot - 1) * 244 : 104;
-			int y = slot ? 268 : 250, w = slot ? 224 : 248, h = slot ? 336 : 368;
+			bool selected = index == position;
+			int x = 104 + (ordinal - scroll) * 254;
+			if (x + 248 < 72 || x >= 1280) continue;
+			int y = selected ? 250 : 268, w = selected ? 248 : 224, h = selected ? 368 : 336;
 			char path[4096];
 			SwitchUIRomPath(params, entry->title, path, sizeof(path));
 			SwitchUIRoundRect(x - 4, y - 4, w + 8, h + 8, 12, 0xB00F0D0B);
 			if (!SwitchUIArtworkDraw(path, false, x, y, w, h))
 				SwitchUIFallback(font, entry, x, y, w, h);
-			if (!slot)
+			if (selected)
 				SwitchUIRoundFrame(x - 5, y - 5, w + 10, h + 10, 12, CONSOLE_FOCUS);
 		}
 		SwitchUIFontSize(font, 16);
