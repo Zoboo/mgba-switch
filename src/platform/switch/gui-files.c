@@ -27,6 +27,9 @@ struct ScanJob {
 };
 static struct ScanJob* _jobs;
 static bool _scanCancelled;
+static bool _libraryFiltersSet;
+static bool (*_libraryFilterName)(const char*);
+static bool (*_libraryFilterContents)(struct VFile*);
 
 static void _cleanFiles(struct GUIMenuItemList* currentFiles) {
 	size_t size = GUIMenuItemListSize(currentFiles);
@@ -240,7 +243,19 @@ static bool _refreshDirectory(struct GUIParams* params, const char* currentPath,
 	return success;
 }
 
+bool SwitchUIFilesRefreshLibrary(struct GUIParams* params, struct GUIMenu* menu) {
+	bool ok = _refreshDirectory(params, params->currentPath, &menu->items, _libraryFilterName, _libraryFilterContents, NULL);
+	if (ok) menu->index = params->fileIndex < GUIMenuItemListSize(&menu->items) ? params->fileIndex : 0;
+	GUIInvalidateKeys(params);
+	return ok;
+}
+
 bool GUISelectFile(struct GUIParams* params, char* outPath, size_t outLen, bool (*filterName)(const char* name), bool (*filterContents)(struct VFile*), const char* preselect) {
+	if (!_libraryFiltersSet) {
+		_libraryFilterName = filterName;
+		_libraryFilterContents = filterContents;
+		_libraryFiltersSet = true;
+	}
 	struct GUIMenu menu = {
 		.title = "Select file",
 		.subtitle = params->currentPath,

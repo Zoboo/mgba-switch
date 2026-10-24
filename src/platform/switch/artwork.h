@@ -27,6 +27,7 @@ void SwitchArtworkSetDownloads(bool covers, bool banners);
 void SwitchArtworkRequest(const char* romPath);
 bool SwitchArtworkAttempt(const char* romPath);
 bool SwitchArtworkDownloadBest(const char* romPath, const char* title);
+bool SwitchArtworkDownloadExact(const char* romPath, const char* title);
 bool SwitchArtworkDownloadMissing(const char* directory);
 void SwitchArtworkCancelBulk(void);
 bool SwitchArtworkPath(const char* romPath, bool banner, char* out, size_t size);

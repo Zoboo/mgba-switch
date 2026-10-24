@@ -11,6 +11,8 @@ struct GUIFont;
 void SwitchUIInit(struct mGUIRunner* runner);
 void SwitchUIDeinit(void);
 void SwitchUIFilesDeinit(void);
+bool SwitchUIFilesRefreshLibrary(struct GUIParams*, struct GUIMenu*);
+bool SwitchUIPlazaRun(struct GUIParams*, bool* files);
 void SwitchUIAchievementsInit(struct mGUIRunner*, const char* directory);
 void SwitchUIAchievementsDeinit(void);
 struct GUIMenu* SwitchUIAchievementsMenu(void);

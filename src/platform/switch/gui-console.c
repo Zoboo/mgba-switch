@@ -41,6 +41,7 @@ void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, c
 	_railItem(font, 78, "G", "Library", true);
 	_railItem(font, 148, "F", "Files", false);
 	_railItem(font, 218, "+", "Settings", false);
+	_railItem(font, 288, "+", "Add Games", false);
 	_railItem(font, 588, "X", "Exit", false);
 
 	if (count) {
@@ -86,6 +87,6 @@ void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, c
 	SwitchUIHint(font, 444, 701, "Y", "Files");
 	SwitchUIHint(font, 614, 701, "L/R", "Filter");
 	SwitchUIHint(font, 846, 701, "+", "Settings");
-	SwitchUIHint(font, 1100, 701, "X", "Exit");
+	SwitchUIHint(font, 1070, 701, "R3", "Add Games");
 	SwitchUIFontSize(font, oldSize);
 }

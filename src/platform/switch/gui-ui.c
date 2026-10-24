@@ -5,6 +5,7 @@
 #include "artwork.h"
 #include "gui-images.h"
 #include "game-settings.h"
+#include "plaza.h"
 #include "feature/gui/gui-runner.h"
 #include <mgba-util/gui/font.h>
 #include <mgba-util/gui/file-select.h>
@@ -66,6 +67,8 @@ static bool _resetBanner, _resetSuccess;
 static char _resetGame[513], _resetMessage[192], _resetNotice[600];
 static u64 _resetNoticeUntil;
 static bool _gameSettingsOpen;
+static bool _addGames;
+static unsigned _plazaInstalled;
 static unsigned _gameSettingsIndex;
 static char _gameSettingsRom[PATH_MAX];
 static struct SwitchGameSettings _gameSettings;
@@ -678,8 +681,8 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 		return true;
 	}
 	if (_pickerPhase == 2 && ((buttons & HidNpadButton_Minus) || (tapped && _inside(x, y, 600, 158, 220, 44)))) {
-		if (!SwitchArtworkHasKey()) {
-			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add your SteamGridDB API key in Settings > Artwork to download artwork.");
+		if (!SwitchArtworkHasKey() && !SwitchPlazaHasKey()) {
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add a SteamGridDB key in Artwork settings or a Romhack Plaza key in Add Games to download artwork.");
 		} else SwitchArtworkDownloadBest(rom, _pickerQuery);
 		GUIInvalidateKeys(params);
 		return true;
@@ -938,8 +941,8 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 			break;
 		case 5:
 			if (progress.bulk) SwitchArtworkCancelBulk();
-			else if (!SwitchArtworkHasKey()) {
-				GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add your SteamGridDB API key before downloading library artwork.");
+			else if (!SwitchArtworkHasKey() && !SwitchPlazaHasKey()) {
+				GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add a SteamGridDB or Romhack Plaza API key before downloading library artwork.");
 				GUIInvalidateKeys(params);
 			} else SwitchArtworkDownloadMissing(params->currentPath);
 			break;
@@ -1032,9 +1035,12 @@ static void _libraryHeader(struct GUIParams* params, bool files) {
 	SwitchUIFontSize(params->font, 30);
 	SwitchUIPrint(params->font, 48, 62, 380, UI_TEXT, "mGBA");
 	SwitchUIFontSize(params->font, 20);
-	SwitchUIPrint(params->font, 542, 60, 112, files ? UI_MUTED : UI_TEXT, "Library");
-	SwitchUIPrint(params->font, 678, 60, 110, files ? UI_TEXT : UI_MUTED, "Files");
-	SwitchUIDrawRect(files ? 678 : 542, 76, files ? 42 : 66, 3, UI_FOCUS);
+	SwitchUIFontSize(params->font, 18);
+	SwitchUIPrint(params->font, 526, 60, 104, files ? UI_MUTED : UI_TEXT, "Library");
+	SwitchUIPrint(params->font, 646, 60, 72, files ? UI_TEXT : UI_MUTED, "Files");
+	SwitchUIPrint(params->font, 734, 60, 110, UI_MUTED, "Add Games");
+	SwitchUIDrawRect(files ? 646 : 526, 76, files ? 42 : 66, 3, UI_FOCUS);
+	SwitchUIFontSize(params->font, 20);
 	const char* filters[] = { "All", "GBA", "GBC", "GB" };
 	for (unsigned i = 0; i < 4; ++i) {
 		int x = 854 + i * 94;
@@ -1059,7 +1065,7 @@ static void _libraryFooter(struct GUIParams* params, bool files, const char* act
 	SwitchUIHint(params->font, 364, 699, "Y", files ? "Library" : "Files");
 	SwitchUIHint(params->font, 560, 699, "L/R", "Filter");
 	SwitchUIHint(params->font, 800, 699, "+", "Settings");
-	SwitchUIHint(params->font, 1082, 699, "X", "Exit");
+	SwitchUIHint(params->font, 1050, 699, "R3", "Add Games");
 }
 
 bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct GUIMenuState* state,
@@ -1111,6 +1117,29 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		return _artwork(params, menu, result);
 	if (!_runner || _runner->core || !menu->title || strcmp(menu->title, "Select file"))
 		return false;
+	if (_addGames) {
+		_addGames = SwitchUIPlazaRun(params, &_files);
+		if (!_addGames) {
+			struct SwitchPlazaState plaza;
+			SwitchPlazaGetState(&plaza);
+			if (_plazaInstalled != plaza.installedRevision) {
+				_plazaInstalled = plaza.installedRevision;
+				if (SwitchUIFilesRefreshLibrary(params, menu)) {
+					_library.menu = NULL;
+				}
+			}
+		}
+		*result = GUI_MENU_CONTINUE;
+		return true;
+	}
+	struct SwitchPlazaState plaza;
+	SwitchPlazaGetState(&plaza);
+	if (!_pickerPhase && !_gameSettingsOpen && _plazaInstalled != plaza.installedRevision) {
+		_plazaInstalled = plaza.installedRevision;
+		if (SwitchUIFilesRefreshLibrary(params, menu)) {
+			_library.menu = NULL;
+		}
+	}
 	SwitchUIUpdatesPoll(params, true);
 	if (SwitchUIUpdatesShouldExit()) { *result = GUI_MENU_EXIT_CANCEL; return true; }
 	if (!_inLibrary) {
@@ -1131,6 +1160,15 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		buttons = 0;
 		tapped = false;
 	}
+	if ((buttons & HidNpadButton_StickR) || (tapped &&
+	    (((!_layout || _files) && _inside(cx, cy, 724, 24, 120, 58)) ||
+	     (_layout && !_files && _inside(cx, cy, 0, 288, 72, 48)) ||
+	     _inside(cx, cy, 1040, 668, 240, 52)))) {
+		_addGames = true;
+		GUIInvalidateKeys(params);
+		*result = GUI_MENU_CONTINUE;
+		return true;
+	}
 	if (tapped && _layout && !_files && cx < 72) {
 		if (cy >= 148 && cy < 196)
 			_files = true;
@@ -1141,9 +1179,9 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	}
 	if (tapped) {
 		if (!_layout || _files) {
-			if (_inside(cx, cy, 526, 24, 124, 58))
+			if (_inside(cx, cy, 526, 24, 104, 58))
 				_files = false;
-			if (_inside(cx, cy, 662, 24, 126, 58))
+			if (_inside(cx, cy, 638, 24, 80, 58))
 				_files = true;
 			for (unsigned i = 0; i < 4; ++i)
 				if (_inside(cx, cy, 854 + i * 94, 24, 82, 54))
@@ -1503,6 +1541,7 @@ void SwitchUIInit(struct mGUIRunner* runner) {
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 	char directory[PATH_MAX];
 	mCoreConfigDirectory(directory, sizeof(directory));
+	SwitchPlazaInit(directory);
 	SwitchUIAchievementsInit(runner, directory);
 	SwitchUIUpdatesInit(runner);
 	strlcat(directory, "/artwork", sizeof(directory));
@@ -1539,6 +1578,7 @@ void SwitchUIDeinit(void) {
 	SwitchUIFilesDeinit();
 	SwitchImagesDeinit();
 	SwitchArtworkDeinit();
+	SwitchPlazaDeinit();
 	GUIMenuItemListDeinit(&_artworkMenu.items);
 	GUIMenuItemListDeinit(&_interfaceMenu.items);
 	GUIMenuItemListDeinit(&_settingsMenu.items);

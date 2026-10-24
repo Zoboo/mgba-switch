@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "artwork.h"
 #include "artwork-jpeg.h"
+#include "plaza.h"
 #include <mgba-util/image.h>
 #include <switch.h>
 #include <curl/curl.h>
@@ -25,6 +26,8 @@ bool busy, suspended;
 Thread worker;
 bool initialized, running, covers, banners, testKey;
 bool pendingAttempt;
+bool pendingExact;
+std::string plazaError;
 bool bulk, bulkScan, bulkPartial;
 unsigned bulkDone, bulkTotal;
 std::string bulkDirectory;
@@ -262,6 +265,18 @@ struct Job {
 bool currentJob(unsigned revision) {
 	mutexLock(&lock); bool result = running && revision == generation; mutexUnlock(&lock); return result;
 }
+bool plazaArtwork(const std::string& rom, const std::string& title, unsigned revision) {
+	char existing[4096]; if (SwitchArtworkPath(rom.c_str(), false, existing, sizeof(existing))) return true;
+	std::vector<unsigned char> image; plazaError.clear();
+	if (!SwitchPlazaArtwork(title.c_str(), image, [revision]() { return currentJob(revision); }, plazaError)) return false;
+	std::string bytes(reinterpret_cast<const char*>(image.data()), image.size());
+	std::string target = cachePath(rom, false), temporary = target + ".tmp"; bool ok = false;
+	if (validImage(bytes)) { FILE* f = fopen(temporary.c_str(), "wb"); ok = f && fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size(); if (f && fclose(f)) ok = false; }
+	else if (image.size() > 2 && image[0] == 0xFF && image[1] == 0xD8) ok = SwitchArtworkConvertJPEG(image.data(), image.size(), temporary.c_str());
+	struct mImage* decoded = ok ? mImageLoad(temporary.c_str()) : nullptr; ok = decoded != nullptr; if (decoded) mImageDestroy(decoded);
+	ok = ok && currentJob(revision) && !rename(temporary.c_str(), target.c_str()); remove(temporary.c_str());
+	if (ok) { mutexLock(&lock); ++imageRevision; mutexUnlock(&lock); } return ok;
+}
 bool scanRoms(const std::string& path, unsigned depth, unsigned revision, unsigned& visited, std::vector<std::string>& roms) {
 	if (depth > 16 || visited >= 100000 || !currentJob(revision)) return false;
 	DIR* dir = opendir(path.c_str());
@@ -302,7 +317,7 @@ void alternatives(const std::string& rom, const std::string& title, bool cover, 
 void work(void*) {
 	while (true) {
 		mutexLock(&lock);
-		while (running && !resetPending && !importPending && discarded.empty() && (suspended || key.empty() || (!bulk && !testKey && !searchPending && !choosePending && (pending.empty() || (!pendingAttempt && !covers && !banners))))) condvarWait(&changed, &lock);
+		while (running && !resetPending && !importPending && discarded.empty() && (suspended || (key.empty() && !SwitchPlazaHasKey()) || (!bulk && !testKey && !searchPending && !choosePending && (pending.empty() || (!pendingAttempt && !covers && !banners))))) condvarWait(&changed, &lock);
 		std::vector<std::string> cleanup; cleanup.swap(discarded);
 		bool alive = running;
 		bool reset = resetPending, restoreBanner = resetBanner;
@@ -312,11 +327,12 @@ void work(void*) {
 		unsigned restoreId = resetSerial;
 		std::string restoreRom = resetRom;
 		resetPending = false;
-		bool cleanupOnly = suspended || key.empty();
+		bool cleanupOnly = suspended || (key.empty() && !SwitchPlazaHasKey());
 		busy = alive;
 		std::string rom = pending, token = key;
 		bool cover = covers, banner = banners, test = testKey;
 		bool attempt = pendingAttempt;
+		bool exact = pendingExact; pendingExact = false;
 		bool scan = bulk && bulkScan;
 		bool bulkItem = bulk && !scan && bulkDone < bulkRoms.size();
 		std::string scanDirectory = bulkDirectory;
@@ -328,6 +344,7 @@ void work(void*) {
 		std::string query = searchTitle;
 		Option selected = choose && chosen < options.size() ? options[chosen] : Option{};
 		if (search || choose) rom = choiceRom;
+		if (!search && !choose && rom.find(" [RHP ") != std::string::npos) exact = true;
 		if (search) { cover = choiceCovers; banner = choiceBanners; }
 		searchPending = choosePending = false;
 		percent = 0; finished = false;
@@ -337,6 +354,7 @@ void work(void*) {
 		for (const auto& path : cleanup) remove(path.c_str());
 		if (!alive) break;
 		Job job{revision, bulkItem};
+		plazaError.clear();
 		if (scan) {
 			std::vector<std::string> roms;
 			unsigned visited = 0;
@@ -427,16 +445,17 @@ void work(void*) {
 		CURL* curl = curl_easy_init();
 		if (!curl) { message("Network unavailable"); mutexLock(&lock); if (revision == generation) { searching = false; finished = true; } mutexUnlock(&lock); continue; }
 		std::string title = cleanTitle(test ? "Metroid" : (search || attempt) && !query.empty() ? query : base(rom));
+		if (token.empty() && !test) { bool ok = cover && plazaArtwork(rom, title, revision); message(ok ? "Romhack Plaza main image downloaded; banners unavailable from this source" : plazaError.empty() ? "No exact Romhack Plaza artwork found" : plazaError.c_str()); mutexLock(&lock); if (revision == generation) { searching = false; finished = true; } mutexUnlock(&lock); curl_easy_cleanup(curl); continue; }
 		size_t suffix = title.find_first_of("([");
 		if (!search && suffix != std::string::npos) title.resize(suffix);
 		char* encoded = curl_easy_escape(curl, title.c_str(), title.size());
 		std::string route = "search/autocomplete/" + std::string(encoded ? encoded : "");
 		curl_free(encoded); curl_easy_cleanup(curl);
 		rapidjson::Document document;
-		if (!json(route, token, revision, document)) { message("SteamGridDB request failed; check key or network"); mutexLock(&lock); if (revision == generation) { searching = false; finished = true; } mutexUnlock(&lock); continue; }
+		if (!json(route, token, revision, document)) { bool fallback = !test && !search && cover && plazaArtwork(rom, title, revision); message(fallback ? "Romhack Plaza main image downloaded; no banner source available" : plazaError.empty() ? "SteamGridDB request failed; check key or network" : plazaError.c_str()); mutexLock(&lock); if (revision == generation) { searching = false; finished = true; } mutexUnlock(&lock); continue; }
 		if (test) { message("SteamGridDB connection successful"); continue; }
 		std::string numberless = withoutNumbers(title);
-		if (document["data"].Empty() && numberless != title && !numberless.empty()) {
+		if (!exact && document["data"].Empty() && numberless != title && !numberless.empty()) {
 			CURL* escape = curl_easy_init();
 			if (escape) {
 				char* value = curl_easy_escape(escape, numberless.c_str(), numberless.size());
@@ -508,19 +527,29 @@ void work(void*) {
 		unsigned id = 0, bestScore = 0;
 		for (const auto& item : document["data"].GetArray()) {
 			if (!item.IsObject() || !item.HasMember("id") || !item["id"].IsUint() || !item.HasMember("name") || !item["name"].IsString()) continue;
+			if (exact && normalized(item["name"].GetString()) != normalized(title)) continue;
 			unsigned score = matchScore(item["name"].GetString(), title);
 			if (!id || score > bestScore) { id = item["id"].GetUint(); bestScore = score; }
 		}
 		if (!id) {
-			if (attempt) alternatives(rom, title, cover, banner, revision);
+			if (cover) { plazaArtwork(rom, title, revision); if (!plazaError.empty()) message(plazaError.c_str()); }
+			char path[4096]; bool missingCover = cover && !SwitchArtworkPath(rom.c_str(), false, path, sizeof(path));
+			bool missingBanner = banner && !SwitchArtworkPath(rom.c_str(), true, path, sizeof(path));
+			if (!missingCover && !missingBanner) message("Artwork ready");
+			mutexLock(&lock); if (revision == generation) finished = true; mutexUnlock(&lock);
+			if (attempt && !exact && (missingCover || missingBanner)) alternatives(rom, title, missingCover, missingBanner, revision);
 			continue;
 		}
 		bool complete = true; unavailable = false;
 		if (cover) complete = download(rom, false, id, token, revision);
 		if (banner) complete = download(rom, true, id, token, revision) && complete;
-		message(complete ? "Artwork ready" : "Artwork unavailable or download failed");
+		if (!complete && cover) plazaArtwork(rom, title, revision);
+		char readyPath[4096];
+		complete = (!cover || SwitchArtworkPath(rom.c_str(), false, readyPath, sizeof(readyPath))) &&
+		           (!banner || SwitchArtworkPath(rom.c_str(), true, readyPath, sizeof(readyPath)));
+		message(complete ? "Artwork ready" : plazaError.empty() ? "Artwork unavailable or download failed" : plazaError.c_str());
 		mutexLock(&lock); if (revision == generation) finished = true; mutexUnlock(&lock);
-		if (!complete && attempt) {
+		if (!complete && attempt && !exact) {
 			char path[4096];
 			bool missingCover = cover && !SwitchArtworkPath(rom.c_str(), false, path, sizeof(path));
 			bool missingBanner = banner && !SwitchArtworkPath(rom.c_str(), true, path, sizeof(path));
@@ -676,25 +705,27 @@ void SwitchArtworkRequest(const char* rom) {
 bool SwitchArtworkAttempt(const char* rom) {
 	return SwitchArtworkDownloadBest(rom, nullptr);
 }
-bool SwitchArtworkDownloadBest(const char* rom, const char* title) {
+static bool queueArtwork(const char* rom, const char* title, bool exact) {
 	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
 	if (title && strlen(title) > 512) return false;
 	mutexLock(&lock);
-	if (key.empty()) { status = "Add a SteamGridDB API key in Settings > Artwork to download."; mutexUnlock(&lock); return false; }
+	if (key.empty() && !SwitchPlazaHasKey()) { status = "Add a SteamGridDB or Romhack Plaza API key to download artwork."; mutexUnlock(&lock); return false; }
 	if (choiceRom != rom) discardOptions();
 	requested = pending = choiceRom = rom;
 	searchTitle = title ? title : "";
-	pendingAttempt = true; suspended = false;
+	pendingAttempt = true; pendingExact = exact; suspended = false;
 	needsChoice = searching = finished = searchPending = choosePending = testKey = false;
 	percent = 0; status = "Looking for artwork...";
 	importPending = false; applying = true; cancelBulkLocked(); ++generation; condvarWakeAll(&changed);
 	mutexUnlock(&lock);
 	return true;
 }
+bool SwitchArtworkDownloadBest(const char* rom, const char* title) { return queueArtwork(rom, title, false); }
+bool SwitchArtworkDownloadExact(const char* rom, const char* title) { return queueArtwork(rom, title, true); }
 bool SwitchArtworkDownloadMissing(const char* path) {
 	if (!initialized || !path || !*path || strlen(path) >= 4096) return false;
 	mutexLock(&lock);
-	if (key.empty()) { status = "Add a SteamGridDB API key in Settings > Artwork to download."; mutexUnlock(&lock); return false; }
+	if (key.empty() && !SwitchPlazaHasKey()) { status = "Add a SteamGridDB or Romhack Plaza API key to download artwork."; mutexUnlock(&lock); return false; }
 	cancelBulkLocked(); ++generation;
 	bulk = bulkScan = true; bulkDone = bulkTotal = 0; bulkDirectory = path;
 	bulkPartial = false;
