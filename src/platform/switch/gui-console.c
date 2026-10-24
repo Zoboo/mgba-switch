@@ -161,17 +161,7 @@ void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, c
 		GUIFontPrint(font, 676, 330, GUI_ALIGN_HCENTER, CONSOLE_TEXT, "No games in this view");
 		SwitchUIFontSize(font, 20);
 		GUIFontPrint(font, 676, 374, GUI_ALIGN_HCENTER, CONSOLE_MUTED,
-		             "Use Files to browse your games, or L+R to change the filter.");
+		             "Enable console icons above, or use Files to browse your games.");
 	}
-	SwitchUIDrawRect(72, 668, 1208, 52, 0xD4211E1B);
-	SwitchUIHint(font, 104, 701, "A", count ? "Play" : "Browse");
-	SwitchUIHint(font, 280, 701, "B", "Back");
-	SwitchUIHint(font, 444, 701, "Y", "Files");
-	SwitchUIHint(font, 614, 701, "L/R", "First / Last");
-	SwitchUIHint(font, 846, 701, "+", "Settings");
-	SwitchUIHint(font, 1070, 701, "R3", "");
-	SwitchUIFontSize(font, 16);
-	SwitchUIPrint(font, 1120, 686, 140, CONSOLE_TEXT, "Download");
-	SwitchUIPrint(font, 1120, 706, 140, CONSOLE_TEXT, "Romhacks");
 	SwitchUIFontSize(font, oldSize);
 }

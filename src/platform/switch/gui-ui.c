@@ -30,7 +30,9 @@ static PadState _pad;
 static GLuint _program, _vao, _vbo, _white;
 static GLint _tint, _bounds, _corner, _border, _shade, _crop;
 static bool _files, _covers, _banners;
-static unsigned _filter, _frames;
+static unsigned _filter = 7, _frames;
+static bool _filterFocused;
+static unsigned _filterIndex;
 static bool _inLibrary;
 static bool _inArtwork;
 static bool _importingArtwork;
@@ -281,11 +283,11 @@ void SwitchUIRomPath(struct GUIParams* params, const char* name, char* path, siz
 
 static const char* _platform(const char* name) {
 	const char* dot = strrchr(name, '.');
-	if (dot && !strcasecmp(dot, ".gba"))
+	if (dot && (!strcasecmp(dot, ".gba") || !strcasecmp(dot, ".agb") || !strcasecmp(dot, ".mb")))
 		return "GBA";
 	if (dot && !strcasecmp(dot, ".gbc"))
 		return "GBC";
-	if (dot && !strcasecmp(dot, ".gb"))
+	if (dot && (!strcasecmp(dot, ".gb") || !strcasecmp(dot, ".dmg") || !strcasecmp(dot, ".sgb")))
 		return "GB";
 	return "";
 }
@@ -307,8 +309,10 @@ static bool _game(const struct GUIMenuItem* item) {
 }
 
 static bool _matches(const struct GUIMenuItem* item) {
-	static const char* platforms[] = { "", "GBA", "GBC", "GB" };
-	return !_filter || !strcmp(_platform(item->title), platforms[_filter]);
+	const char* platform = _platform(item->title);
+	unsigned mask = !strcmp(platform, "GBA") ? 1 : !strcmp(platform, "GBC") ? 2 : !strcmp(platform, "GB") ? 4 : 7;
+	/* Unknown platform files remain available when every console is enabled. */
+	return mask == 7 ? _filter == 7 : (_filter & mask) != 0;
 }
 
 void SwitchUIBeginMenu(const struct GUIMenu* menu) {
@@ -598,14 +602,6 @@ static void _pickerOpen(struct GUIParams* params, const char* rom, bool banner) 
 	SwitchArtworkSearch(_pickerQuery);
 	SwitchImagesInvalidate();
 	GUIInvalidateKeys(params);
-}
-
-static void _artworkAction(struct GUIParams* params, bool available) {
-	if (!available) return;
-	SwitchUIRoundRect(232, 30, 136, 44, 8, UI_SURFACE);
-	SwitchUIHint(params->font, 240, 60, "ZL", "Art");
-	SwitchUIRoundRect(380, 30, 138, 44, 8, UI_SURFACE);
-	SwitchUIHint(params->font, 388, 60, "ZR", "Game");
 }
 
 static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool tapped, unsigned x, unsigned y) {
@@ -1134,46 +1130,35 @@ static void _fallback(struct GUIFont* font, const struct GUIMenuItem* entry, int
 }
 
 static void _libraryHeader(struct GUIParams* params, bool files) {
-	SwitchUIFontSize(params->font, 30);
-	SwitchUIPrint(params->font, 88, 62, 140, UI_TEXT, "mGBA");
-	SwitchUIFontSize(params->font, 20);
-	SwitchUIFontSize(params->font, 18);
-	SwitchUIPrint(params->font, 526, 60, 104, files ? UI_MUTED : UI_TEXT, "Library");
-	SwitchUIPrint(params->font, 646, 60, 72, files ? UI_TEXT : UI_MUTED, "Files");
-	SwitchUIFontSize(params->font, 15);
-	SwitchUIPrint(params->font, 734, 43, 110, UI_MUTED, "Download");
-	SwitchUIPrint(params->font, 734, 64, 110, UI_MUTED, "Romhacks");
-	SwitchUIDrawRect(files ? 646 : 526, 76, files ? 42 : 66, 3, UI_FOCUS);
-	SwitchUIFontSize(params->font, 20);
-	const char* filters[] = { "All", "GBA", "GBC", "GB" };
-	for (unsigned i = 0; i < 4; ++i) {
-		int x = 854 + i * 94;
-		if (_filter == i)
-			SwitchUIRoundRect(x, 32, 82, 38, 19, UI_FOCUS);
-		GUIFontPrint(params->font, x + 41, 58, GUI_ALIGN_HCENTER, _filter == i ? UI_BASE : UI_TEXT, filters[i]);
+	(void) files;
+	for (unsigned i = 0; i < 3; ++i) {
+		int x = 514 + i * 88;
+		bool enabled = (_filter & (1U << i)) != 0;
+		uint32_t ink = enabled ? UI_TEXT : UI_MUTED;
+		SwitchUIRoundRect(x, 22, 76, 60, 12, enabled ? 0xFF9B5990 : UI_SURFACE);
+		if (_filterFocused && _filterIndex == i)
+			SwitchUIRoundFrame(x - 3, 19, 82, 66, 14, UI_TEXT);
+		if (!i) {
+			SwitchUIRoundRect(x + 13, 39, 50, 28, 10, ink);
+			SwitchUIRoundRect(x + 27, 44, 24, 18, 2, UI_BASE);
+			SwitchUIDrawRect(x + 17, 51, 8, 3, UI_BASE);
+			SwitchUIDrawRect(x + 20, 48, 3, 9, UI_BASE);
+			SwitchUIRoundRect(x + 54, 49, 4, 4, 2, UI_BASE);
+		} else {
+			SwitchUIRoundRect(x + 24, 31, 28, 43, i == 1 ? 6 : 3, ink);
+			SwitchUIRoundRect(x + 28, 35, 20, 18, 2, UI_BASE);
+			SwitchUIDrawRect(x + 28, 61, 9, 3, UI_BASE);
+			SwitchUIDrawRect(x + 31, 58, 3, 9, UI_BASE);
+			SwitchUIRoundRect(x + 42, 59, 4, 4, 2, UI_BASE);
+			if (i == 1) SwitchUIRoundRect(x + 46, 56, 3, 3, 1, UI_BASE);
+		}
 	}
-	SwitchUIFontSize(params->font, 18);
-	SwitchUIPrint(params->font, 88, 104, 950, UI_MUTED,
-	              files ? params->currentPath : "Game Boy Advance  /  Game Boy Color  /  Game Boy  |  L+R: filter");
-	char count[48];
-	size_t total = files ? _library.nFiles : _library.nGames;
-	snprintf(count, sizeof(count), "%zu %s", total,
-	         files ? (total == 1 ? "item" : "items") : (total == 1 ? "game" : "games"));
-	GUIFontPrint(params->font, 1232, 104, GUI_ALIGN_RIGHT, UI_MUTED, count);
+	SwitchUIFontSize(params->font, 24);
 }
 
-static void _libraryFooter(struct GUIParams* params, bool files, const char* action) {
-	SwitchUIDrawRect(48, 662, 1184, 1, 0xFF38332D);
-	SwitchUIHint(params->font, 88, 699, "A", action);
-	SwitchUIHint(params->font, 248, 699, "B", "Back");
-	SwitchUIHint(params->font, 364, 699, "Y", files ? "Library" : "Files");
-	SwitchUIHint(params->font, 560, 699, "L/R", "First / Last");
-	SwitchUIHint(params->font, 800, 699, "+", "Settings");
-	SwitchUIHint(params->font, 1050, 699, "R3", "");
-	SwitchUIFontSize(params->font, 16);
-	SwitchUIPrint(params->font, 1100, 684, 160, UI_TEXT, "Download");
-	SwitchUIPrint(params->font, 1100, 704, 160, UI_TEXT, "Romhacks");
-	SwitchUIFontSize(params->font, 24);
+static void _libraryFooter(struct GUIParams* params) {
+	SwitchUIDrawRect(72, 668, 1208, 52, 0xD4211E1B);
+	SwitchUIHint(params->font, 1032, 701, "X", "Game Settings");
 }
 
 static struct GUIMenu* _activeLibrary(struct GUIParams* params, struct GUIMenu* files) {
@@ -1404,7 +1389,10 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		buttons = 0;
 		tapped = false;
 	}
-	if (!_pickerPhase && !_gameSettingsOpen) {
+	bool gameSettingsRequested = !_pickerPhase && !_gameSettingsOpen &&
+	    ((buttons & (HidNpadButton_X | HidNpadButton_ZR)) || (tapped && _inside(cx, cy, 1024, 668, 256, 52)));
+	if (tapped && cx < 220) _filterFocused = false;
+	if (!_pickerPhase && !_gameSettingsOpen && !_filterFocused) {
 		const size_t* navEntries = _files ? _library.files : _library.games;
 		size_t navCount = _files ? _library.nFiles : _library.nGames;
 		bool enter = _files || !navCount || !_position(menu->index, navEntries, navCount);
@@ -1413,70 +1401,65 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		int navigation = SwitchUINavigationInput(params, _files ? 1 : 0, enter, input, tapped, cx, cy);
 		if (navigation != -1) {
 			carouselTap = navigation == -3 && !_files;
-			carouselBlocked = true;
-			input = 0; buttons = 0; tapped = false;
+			bool headerTap = navigation == -3 && cy >= 22 && cy < 82;
+			carouselBlocked = !headerTap;
+			input = 0; buttons = 0; tapped = headerTap;
 			if (navigation == 0 || navigation == 1) { _files = navigation == 1; _lastSelection = SIZE_MAX; }
 			if (navigation == 2) SwitchUIOpenSettings(params);
 			if (navigation == 3) { _addGames = true; *result = GUI_MENU_CONTINUE; return true; }
 			if (navigation == 4) { SwitchUINavigationExitRequested(); *result = GUI_MENU_EXIT_CANCEL; return true; }
 		}
 	}
-	if ((buttons & HidNpadButton_StickR) || (tapped &&
-	    (((!_layout || _files) && _inside(cx, cy, 724, 24, 120, 58)) ||
-	     (_layout && !_files && _inside(cx, cy, 0, 288, 72, 48)) ||
-	     _inside(cx, cy, 1040, 668, 240, 52)))) {
+	if (buttons & HidNpadButton_StickR) {
 		_addGames = true;
 		GUIInvalidateKeys(params);
 		*result = GUI_MENU_CONTINUE;
 		return true;
 	}
-	bool cycleFilter = (buttons & (HidNpadButton_L | HidNpadButton_R)) &&
-	    (padGetButtons(&_pad) & (HidNpadButton_L | HidNpadButton_R)) == (HidNpadButton_L | HidNpadButton_R);
-	if (tapped) {
-		if (!_layout || _files) {
-			if (_inside(cx, cy, 526, 24, 104, 58))
-				_files = false;
-			if (_inside(cx, cy, 638, 24, 80, 58))
-				_files = true;
-			for (unsigned i = 0; i < 4; ++i)
-				if (_inside(cx, cy, 854 + i * 94, 24, 82, 54))
-					_filter = i;
-		} else if (_inside(cx, cy, 1080, 24, 152, 48))
-			cycleFilter = true;
-		if (cy >= 664 && _layout && !_files) {
-			if (_inside(cx, cy, 96, 668, 160, 52))
-				input |= 1U << GUI_INPUT_SELECT;
-			else if (_inside(cx, cy, 272, 668, 144, 52))
-				input |= 1U << GUI_INPUT_BACK;
-			else if (_inside(cx, cy, 436, 668, 160, 52))
-				buttons |= HidNpadButton_Y;
-			else if (_inside(cx, cy, 606, 668, 214, 52))
-				buttons |= cx < 713 ? HidNpadButton_L : HidNpadButton_R;
-			else if (_inside(cx, cy, 838, 668, 220, 52))
-				buttons |= HidNpadButton_Plus;
-			else if (_inside(cx, cy, 1092, 668, 140, 52))
-				input |= 1U << GUI_INPUT_CANCEL;
-		} else if (cy >= 664) {
-			if (cx < 240)
-				input |= 1U << GUI_INPUT_SELECT;
-			else if (cx < 350)
-				input |= 1U << GUI_INPUT_BACK;
-			else if (cx < 540)
-				buttons |= HidNpadButton_Y;
-			else if (cx < 760)
-				buttons |= cx < 650 ? HidNpadButton_L : HidNpadButton_R;
-			else if (cx < 1030)
-				buttons |= HidNpadButton_Plus;
-			else
-				input |= 1U << GUI_INPUT_CANCEL;
+	bool changedFilter = false;
+	if (!_pickerPhase && !_gameSettingsOpen && !carouselBlocked) {
+		if (padGetButtons(&_pad) & HidNpadButton_X)
+			input &= ~(1U << GUI_INPUT_CANCEL);
+		bool wasFocused = _filterFocused;
+		if (!_filterFocused && (!_files || !_position(menu->index, _library.files, _library.nFiles)) && (input & (1U << GUI_INPUT_UP))) {
+			_filterFocused = true;
+			input = 0;
 		}
+		if (_filterFocused) {
+			if (input & (1U << GUI_INPUT_LEFT)) _filterIndex = (_filterIndex + 2) % 3;
+			if (input & (1U << GUI_INPUT_RIGHT)) _filterIndex = (_filterIndex + 1) % 3;
+			if (input & (1U << GUI_INPUT_SELECT)) {
+				_filter ^= 1U << _filterIndex;
+				changedFilter = true;
+			}
+			if (wasFocused && (input & ((1U << GUI_INPUT_DOWN) | (1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))))
+				_filterFocused = false;
+			input = 0;
+			buttons &= ~(HidNpadButton_L | HidNpadButton_R);
+		}
+		if (tapped) {
+			for (unsigned i = 0; i < 3; ++i) {
+				if (_inside(cx, cy, 514 + i * 88, 22, 76, 60)) {
+					_filter ^= 1U << i;
+					_filterIndex = i;
+					changedFilter = true;
+					tapped = false;
+					break;
+				}
+			}
+			if (tapped && cy > 100) _filterFocused = false;
+		}
+	}
+	if (changedFilter) {
+		_swipe.velocity = 0;
+		_swipe.dragging = false;
+		_scroll = 0;
+		_lastSelection = SIZE_MAX;
 	}
 	if (buttons & HidNpadButton_Y) {
 		_files = !_files;
 		_lastSelection = SIZE_MAX;
 	}
-	if (cycleFilter)
-		_filter = (_filter + 1) % 4;
 	menu = _activeLibrary(params, fileMenu);
 	if (!_indexLibrary(params, menu))
 		return false;
@@ -1487,6 +1470,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		input = 0;
 		tapped = false;
 	}
+	if (gameSettingsRequested) input = 0;
 	if (input & (1U << GUI_INPUT_CANCEL)) {
 		*result = GUI_MENU_EXIT_CANCEL;
 		return true;
@@ -1504,14 +1488,14 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		--position;
 	if (position + 1 < count && (input & ((1U << GUI_INPUT_RIGHT) | (1U << GUI_INPUT_DOWN))))
 		++position;
-	if (count && !cycleFilter) {
+	if (count && !changedFilter) {
 		if (buttons & HidNpadButton_L) position = 0;
 		if (buttons & HidNpadButton_R) position = count - 1;
 	}
 	if (_lastSelection == SIZE_MAX || (fabsf(_scroll - (float) position) > 3.f &&
 	    (input || buttons || (!_swipe.dragging && !_swipe.velocity))))
 		_scroll = position;
-	bool swiping = _carouselTouch(count, &position, !_files && !carouselBlocked && !input && !buttons && !cycleFilter &&
+	bool swiping = _carouselTouch(count, &position, !_files && !carouselBlocked && !_filterFocused && !input && !buttons && !changedFilter &&
 	    _lastSelection != SIZE_MAX, &tapped);
 	if (!swiping) {
 		_scroll += ((float) position - _scroll) * 0.22f;
@@ -1577,7 +1561,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		menu->index = entries[position];
 	const struct GUIMenuItem* selected = count ? GUIMenuItemListGetConstPointer(&menu->items, menu->index) : NULL;
 	if (!_pickerPhase && !_gameSettingsOpen && selected && _game(selected) &&
-	    ((buttons & HidNpadButton_ZR) || (tapped && _inside(cx, cy, 380, 30, 138, 44)))) {
+	    gameSettingsRequested) {
 		_path(params, selected->title, _gameSettingsRom, sizeof(_gameSettingsRom));
 		if (SwitchGameSettingsLoad(_gameSettingsRom, &_gameSettings)) {
 			_gameSettingsOpen = true;
@@ -1587,7 +1571,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		input = 0;
 	}
 	if (!_pickerPhase && !_gameSettingsOpen && selected && _game(selected) &&
-	    ((buttons & (HidNpadButton_ZL | HidNpadButton_Minus)) || (tapped && _inside(cx, cy, 232, 30, 136, 44)))) {
+	    (buttons & (HidNpadButton_ZL | HidNpadButton_Minus))) {
 		char rom[PATH_MAX];
 		_path(params, selected->title, rom, sizeof(rom));
 		const char* filename = strrchr(selected->title, '/');
@@ -1626,13 +1610,11 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		if (selected)
 			_image(path, true, 0, 0, 1280, 668);
 		SwitchUIConsoleDraw(params, menu, entries, count, position, _scroll);
-		const char* filters[] = { "All games", "GBA", "GBC", "GB" };
-		SwitchUIFontSize(params->font, 18);
-		GUIFontPrintf(params->font, 1216, 52, GUI_ALIGN_RIGHT, UI_FOCUS, "L+R: %s", filters[_filter]);
+		_libraryHeader(params, false);
+		_libraryFooter(params);
 		if (!count && (input & (1U << GUI_INPUT_SELECT)))
 			_files = true;
 		SwitchUIFontSize(params->font, 24);
-		_artworkAction(params, selected && _game(selected));
 		SwitchUINavigationDraw(params, 0);
 		_gameSettingsDraw(params);
 		_pickerDraw(params);
@@ -1723,18 +1705,17 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		_cartridge(608, 218, 64, 0xFF736A61);
 		SwitchUIFontSize(params->font, 30);
 		GUIFontPrint(params->font, 640, 338, GUI_ALIGN_HCENTER, UI_TEXT,
-		             _filter ? "No games match this filter" : "No games in this folder");
+		             _filter != 7 ? "No games match these consoles" : "No games in this folder");
 		SwitchUIFontSize(params->font, 20);
 		GUIFontPrint(params->font, 640, 382, GUI_ALIGN_HCENTER, UI_MUTED,
-		             _filter ? "Choose All or browse another folder." :
+		             _filter != 7 ? "Enable console icons above, or browse another folder." :
 		                       "Open Files to choose a folder containing your games.");
 		_button(params->font, 514, 430, 252, "Browse files", true);
 		if (input & (1U << GUI_INPUT_SELECT))
 			_files = true;
 	}
-	_libraryFooter(params, _files, _files ? "Open" : count ? "Play" : "Browse");
+	_libraryFooter(params);
 	SwitchUIFontSize(params->font, 24);
-	_artworkAction(params, selected && _game(selected));
 	SwitchUINavigationDraw(params, _files ? 1 : 0);
 	_gameSettingsDraw(params);
 	_pickerDraw(params);

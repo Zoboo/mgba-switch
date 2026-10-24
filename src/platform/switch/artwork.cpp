@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "artwork.h"
+#include "service-key.h"
 #include "artwork-jpeg.h"
 #include "plaza.h"
 #include <mgba-util/image.h>
@@ -724,6 +725,8 @@ void SwitchArtworkInit(const char* path) {
 	char buffer[129] = {};
 	FILE* file = fopen((directory + "/steamgriddb.key").c_str(), "rb");
 	if (file) { size_t n = fread(buffer, 1, 128, file); fclose(file); buffer[n] = 0; key = buffer; for (unsigned char c : key) if (!std::isalnum(c)) { key.clear(); break; } }
+	std::string importedKey;
+	if (SwitchServiceKeyRead("steamgriddb", importedKey)) key = importedKey;
 	if (curl_global_init(CURL_GLOBAL_DEFAULT)) return;
 	running = true;
 	if (R_FAILED(threadCreate(&worker, work, nullptr, nullptr, 128 * 1024, 0x3B, -2))) { running = false; curl_global_cleanup(); return; }
