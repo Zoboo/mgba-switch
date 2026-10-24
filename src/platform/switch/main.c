@@ -5,6 +5,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "feature/gui/gui-runner.h"
 #include "gui-ui.h"
+#include "game-settings.h"
 #include "achievements.h"
 #include <mgba/core/core.h>
 #include <mgba/internal/gb/video.h>
@@ -283,6 +284,7 @@ static void _resetSampleRate(u32 samplerate) {
 }
 
 static void _setup(struct mGUIRunner* runner) {
+	SwitchGameSettingsApply(runner);
 	SwitchAchievementsAttach(runner->core);
 	_mapKey(&runner->core->inputMap, AUTO_INPUT, HidNpadButton_A, GBA_KEY_A);
 	_mapKey(&runner->core->inputMap, AUTO_INPUT, HidNpadButton_B, GBA_KEY_B);
@@ -1142,6 +1144,7 @@ int main(int argc, char* argv[]) {
 
 	if (argc > 1) {
 		mGUILoadInputMaps(&runner);
+		SwitchGameSettingsSetRom(argv[1]);
 		mGUIRun(&runner, argv[1]);
 	} else {
 		mGUIRunloop(&runner);

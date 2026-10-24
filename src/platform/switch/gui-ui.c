@@ -4,6 +4,7 @@
 #include "gui-ui.h"
 #include "artwork.h"
 #include "gui-images.h"
+#include "game-settings.h"
 #include "feature/gui/gui-runner.h"
 #include <mgba-util/gui/font.h>
 #include <mgba-util/gui/file-select.h>
@@ -64,6 +65,10 @@ static unsigned _resetWatch;
 static bool _resetBanner, _resetSuccess;
 static char _resetGame[513], _resetMessage[192], _resetNotice[600];
 static u64 _resetNoticeUntil;
+static bool _gameSettingsOpen;
+static unsigned _gameSettingsIndex;
+static char _gameSettingsRom[PATH_MAX];
+static struct SwitchGameSettings _gameSettings;
 
 static GLuint _shader(GLenum type, const char* source) {
 	GLuint shader = glCreateShader(type);
@@ -505,8 +510,90 @@ static void _pickerOpen(struct GUIParams* params, const char* rom, bool banner) 
 
 static void _artworkAction(struct GUIParams* params, bool available) {
 	if (!available) return;
-	SwitchUIRoundRect(232, 30, 214, 44, 8, UI_SURFACE);
-	SwitchUIHint(params->font, 244, 60, "ZL", "Artwork");
+	SwitchUIRoundRect(232, 30, 136, 44, 8, UI_SURFACE);
+	SwitchUIHint(params->font, 240, 60, "ZL", "Art");
+	SwitchUIRoundRect(380, 30, 138, 44, 8, UI_SURFACE);
+	SwitchUIHint(params->font, 388, 60, "ZR", "Game");
+}
+
+static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool tapped, unsigned x, unsigned y) {
+	if (!_gameSettingsOpen || _pickerPhase) return false;
+	if (input & ((1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) {
+		_gameSettingsOpen = false;
+		GUIInvalidateKeys(params);
+		return true;
+	}
+	if (input & (1U << GUI_INPUT_UP)) _gameSettingsIndex = (_gameSettingsIndex + 4) % 5;
+	if (input & (1U << GUI_INPUT_DOWN)) _gameSettingsIndex = (_gameSettingsIndex + 1) % 5;
+	bool activate = input & (1U << GUI_INPUT_SELECT);
+	if (tapped && _inside(x, y, 216, 220, 848, 330)) {
+		_gameSettingsIndex = (y - 220) / 66;
+		activate = true;
+	}
+	if (activate) {
+		if (_gameSettingsIndex < 2) {
+			const char* title = strrchr(_gameSettingsRom, '/');
+			strlcpy(_pickerQuery, title ? title + 1 : _gameSettingsRom, sizeof(_pickerQuery));
+			char* extension = strrchr(_pickerQuery, '.');
+			if (extension) *extension = 0;
+			_pickerOpen(params, _gameSettingsRom, _gameSettingsIndex == 1);
+		} else if (_gameSettingsIndex == 2) {
+			SwkbdConfig keyboard;
+			if (R_SUCCEEDED(swkbdCreate(&keyboard, 0))) {
+				swkbdConfigMakePresetDefault(&keyboard);
+				swkbdConfigSetHeaderText(&keyboard, "Save folder (existing sdmc:/ folder; blank for default)");
+				swkbdConfigSetInitialText(&keyboard, _gameSettings.directory);
+				swkbdConfigSetStringLenMax(&keyboard, PATH_MAX - 1);
+				struct SwitchGameSettings next = _gameSettings;
+				bool accepted = R_SUCCEEDED(swkbdShow(&keyboard, next.directory, sizeof(next.directory)));
+				swkbdClose(&keyboard);
+				if (accepted) {
+					if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
+					else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save settings. Choose an existing writable sdmc:/ folder.");
+				}
+			}
+		} else if (_gameSettingsIndex == 3) {
+			const char* extensions[] = { "", ".sav", ".srm", ".dat" };
+			unsigned index = 0;
+			while (index < 3 && strcmp(_gameSettings.extension, extensions[index])) ++index;
+			struct SwitchGameSettings next = _gameSettings;
+			strlcpy(next.extension, extensions[(index + 1) % 4], sizeof(next.extension));
+			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
+			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
+		} else if (_gameSettingsIndex == 4) {
+			struct SwitchGameSettings next = { 0 };
+			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
+			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
+		}
+		GUIInvalidateKeys(params);
+	}
+	return true;
+}
+
+static void _gameSettingsDraw(struct GUIParams* params) {
+	if (!_gameSettingsOpen) return;
+	SwitchUIDrawRect(0, 0, 1280, 720, 0xD9000000);
+	SwitchUIRoundRect(184, 100, 912, 528, 16, UI_BASE);
+	SwitchUIFontSize(params->font, 28);
+	SwitchUIPrint(params->font, 216, 148, 848, UI_TEXT, "Game settings");
+	const char* name = strrchr(_gameSettingsRom, '/');
+	SwitchUIFontSize(params->font, 20);
+	SwitchUIPrint(params->font, 216, 184, 848, UI_FOCUS, name ? name + 1 : _gameSettingsRom);
+	const char* labels[] = { "Change cover", "Change banner", "Save folder", "Save file extension (raw saves only)", "Restore default save settings" };
+	for (unsigned i = 0; i < 5; ++i) {
+		int top = 220 + 66 * i;
+		if (_gameSettingsIndex == i) SwitchUIRoundFrame(212, top, 856, 60, 8, UI_FOCUS);
+		SwitchUIFontSize(params->font, 20);
+		SwitchUIPrint(params->font, 232, top + 25, 808, UI_TEXT, labels[i]);
+		const char* value = i == 2 ? (_gameSettings.directory[0] ? _gameSettings.directory : "Default save folder") :
+		                    i == 3 ? (_gameSettings.extension[0] ? _gameSettings.extension : "Default (.sav or configured player slot)") : NULL;
+		if (value) { SwitchUIFontSize(params->font, 16); SwitchUIPrint(params->font, 232, top + 48, 808, UI_MUTED, value); }
+	}
+	SwitchUIFontSize(params->font, 18);
+	SwitchUIPrint(params->font, 216, 580, 848, UI_MUTED, "Save changes apply next launch. Existing save files are not moved or converted.");
+	SwitchUIHint(params->font, 216, 612, "B", "Back");
+	SwitchUIHint(params->font, 880, 612, "A", "Change");
+	SwitchUIFontSize(params->font, 24);
 }
 
 static bool _artworkImageFile(const char* name) {
@@ -1038,7 +1125,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	GUIPollInput(params, &input, NULL);
 	unsigned cx, cy;
 	bool tapped = _tap(params, &cx, &cy);
-	if (_pickerInput(params, _focusPath, input, buttons, tapped, cx, cy)) {
+	if (_pickerInput(params, _focusPath, input, buttons, tapped, cx, cy) ||
+	    _gameSettingsInput(params, input, tapped, cx, cy)) {
 		input = 0;
 		buttons = 0;
 		tapped = false;
@@ -1176,8 +1264,18 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	if (count)
 		menu->index = entries[position];
 	const struct GUIMenuItem* selected = count ? GUIMenuItemListGetConstPointer(&menu->items, menu->index) : NULL;
-	if (!_pickerPhase && selected && _game(selected) &&
-	    ((buttons & (HidNpadButton_ZL | HidNpadButton_Minus)) || (tapped && _inside(cx, cy, 232, 30, 214, 44)))) {
+	if (!_pickerPhase && !_gameSettingsOpen && selected && _game(selected) &&
+	    ((buttons & HidNpadButton_ZR) || (tapped && _inside(cx, cy, 380, 30, 138, 44)))) {
+		_path(params, selected->title, _gameSettingsRom, sizeof(_gameSettingsRom));
+		if (SwitchGameSettingsLoad(_gameSettingsRom, &_gameSettings)) {
+			_gameSettingsOpen = true;
+			_gameSettingsIndex = 0;
+		} else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not read game settings. Check SD card access.");
+		GUIInvalidateKeys(params);
+		input = 0;
+	}
+	if (!_pickerPhase && !_gameSettingsOpen && selected && _game(selected) &&
+	    ((buttons & (HidNpadButton_ZL | HidNpadButton_Minus)) || (tapped && _inside(cx, cy, 232, 30, 136, 44)))) {
 		char rom[PATH_MAX];
 		_path(params, selected->title, rom, sizeof(rom));
 		strlcpy(_pickerQuery, selected->title, sizeof(_pickerQuery));
@@ -1190,6 +1288,9 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		state->resultItem = GUIMenuItemListGetPointer(&menu->items, menu->index);
 		*result = GUI_MENU_EXIT_ACCEPT;
 		if (GUIVariantCompareUInt(selected->data, VFS_FILE)) {
+			char rom[PATH_MAX];
+			_path(params, selected->title, rom, sizeof(rom));
+			SwitchGameSettingsSetRom(rom);
 			SwitchArtworkSuspend();
 			SwitchImagesSuspend();
 			_clearTextures();
@@ -1219,6 +1320,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 			_files = true;
 		SwitchUIFontSize(params->font, 24);
 		_artworkAction(params, selected && _game(selected));
+		_gameSettingsDraw(params);
 		_pickerDraw(params);
 		params->guiFinish();
 		params->drawEnd();
@@ -1318,6 +1420,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	_libraryFooter(params, _files, _files ? "Open" : count ? "Play" : "Browse");
 	SwitchUIFontSize(params->font, 24);
 	_artworkAction(params, selected && _game(selected));
+	_gameSettingsDraw(params);
 	_pickerDraw(params);
 	params->guiFinish();
 	params->drawEnd();
