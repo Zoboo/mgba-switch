@@ -35,7 +35,8 @@ bool SwitchUIArtworkDraw(const char*, bool, int, int, int, int);
 void SwitchUIRomPath(struct GUIParams*, const char*, char*, size_t);
 void SwitchUIFallback(struct GUIFont*, const struct GUIMenuItem*, int, int, int, int);
 void SwitchUIRailIcon(int kind, uint32_t color);
-/* Returns -1 for content input, -2 for consumed input, or the activated rail item (0-4). */
+/* Returns -1 for content input, -2 for consumed input, -3 for an outside dismissal tap,
+ * or the activated rail item (0-4). */
 int SwitchUINavigationInput(struct GUIParams*, unsigned current, bool enter, uint32_t input,
                             bool tapped, unsigned x, unsigned y);
 void SwitchUINavigationDraw(struct GUIParams*, unsigned current);

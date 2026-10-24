@@ -767,7 +767,7 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 	}
 	if (_pickerPhase == 2 && ((buttons & HidNpadButton_Minus) || (tapped && _inside(x, y, 600, 158, 220, 44)))) {
 		if (!SwitchArtworkHasKey() && !SwitchPlazaHasKey()) {
-			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add a SteamGridDB key in Artwork settings or a Romhack Plaza key in Add Games to download artwork.");
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add a SteamGridDB key in Artwork settings or a Romhack Plaza key in Download Romhacks to download artwork.");
 		} else SwitchArtworkDownloadBestFromSource(rom, _pickerQuery, SwitchArtworkGetSource());
 		GUIInvalidateKeys(params);
 		return true;
@@ -1128,7 +1128,9 @@ static void _libraryHeader(struct GUIParams* params, bool files) {
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 526, 60, 104, files ? UI_MUTED : UI_TEXT, "Library");
 	SwitchUIPrint(params->font, 646, 60, 72, files ? UI_TEXT : UI_MUTED, "Files");
-	SwitchUIPrint(params->font, 734, 60, 110, UI_MUTED, "Add Games");
+	SwitchUIFontSize(params->font, 15);
+	SwitchUIPrint(params->font, 734, 43, 110, UI_MUTED, "Download");
+	SwitchUIPrint(params->font, 734, 64, 110, UI_MUTED, "Romhacks");
 	SwitchUIDrawRect(files ? 646 : 526, 76, files ? 42 : 66, 3, UI_FOCUS);
 	SwitchUIFontSize(params->font, 20);
 	const char* filters[] = { "All", "GBA", "GBC", "GB" };
@@ -1155,7 +1157,11 @@ static void _libraryFooter(struct GUIParams* params, bool files, const char* act
 	SwitchUIHint(params->font, 364, 699, "Y", files ? "Library" : "Files");
 	SwitchUIHint(params->font, 560, 699, "L/R", "First / Last");
 	SwitchUIHint(params->font, 800, 699, "+", "Settings");
-	SwitchUIHint(params->font, 1050, 699, "R3", "Add Games");
+	SwitchUIHint(params->font, 1050, 699, "R3", "");
+	SwitchUIFontSize(params->font, 16);
+	SwitchUIPrint(params->font, 1100, 684, 160, UI_TEXT, "Download");
+	SwitchUIPrint(params->font, 1100, 704, 160, UI_TEXT, "Romhacks");
+	SwitchUIFontSize(params->font, 24);
 }
 
 bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct GUIMenuState* state,
@@ -1247,6 +1253,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	bool tapped = _tap(params, &cx, &cy);
 	if (_swipe.dragging || _swipe.suppressTap) tapped = false;
 	bool carouselBlocked = _pickerPhase || _gameSettingsOpen;
+	bool carouselTap = false;
 	if (_pickerInput(params, _focusPath, input, buttons, tapped, cx, cy) ||
 	    _gameSettingsInput(params, input, tapped, cx, cy)) {
 		input = 0;
@@ -1261,6 +1268,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		if (shortcut) input |= 1U << GUI_INPUT_LEFT;
 		int navigation = SwitchUINavigationInput(params, _files ? 1 : 0, enter, input, tapped, cx, cy);
 		if (navigation != -1) {
+			carouselTap = navigation == -3 && !_files;
 			carouselBlocked = true;
 			input = 0; buttons = 0; tapped = false;
 			if (navigation == 0 || navigation == 1) { _files = navigation == 1; _lastSelection = SIZE_MAX; }
@@ -1377,7 +1385,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 				input |= 1U << GUI_INPUT_SELECT;
 			}
 		}
-	} else if (tapped) {
+	} else if (tapped || carouselTap) {
 		if (_layout && count) {
 			int first = (int) floorf(_scroll) - 1;
 			for (int ordinal = first; ordinal < first + 7; ++ordinal) {
@@ -1387,13 +1395,13 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 				int right = left + (selected ? 248 : 224);
 				if (left < 72) left = 72;
 				if (right > left && _inside(cx, cy, left, selected ? 250 : 268, right - left, selected ? 368 : 336)) {
-					if (selected)
+					if (selected && !carouselTap)
 						input |= 1U << GUI_INPUT_SELECT;
 					position = ordinal;
 					break;
 				}
 			}
-			if (_inside(cx, cy, 104, 638, 240, 24))
+			if (tapped && _inside(cx, cy, 104, 638, 240, 24))
 				input |= 1U << GUI_INPUT_SELECT;
 		} else {
 			float center = _scroll;
@@ -1409,14 +1417,14 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 				if (x < 72) { w -= 72 - x; x = 72; }
 				if (w <= 0) continue;
 				if (_inside(cx, cy, x, y, w, h)) {
-					if (index == position)
+					if (index == position && !carouselTap)
 						input |= 1U << GUI_INPUT_SELECT;
 					position = index;
 				}
 			}
-			if (count && _inside(cx, cy, 514, 610, 252, 44))
+			if (tapped && count && _inside(cx, cy, 514, 610, 252, 44))
 				input |= 1U << GUI_INPUT_SELECT;
-			if (!count && _inside(cx, cy, 514, 430, 252, 44))
+			if (tapped && !count && _inside(cx, cy, 514, 430, 252, 44))
 				_files = true;
 		}
 	}

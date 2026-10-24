@@ -148,11 +148,13 @@ bool SwitchUIPlazaRun(struct GUIParams* params, bool* files) {
 	params->drawStart(); params->guiPrepare();
 	SwitchUIDrawRect(0, 0, 1280, 720, BASE);
 	SwitchUIFontSize(params->font, 30);
-	SwitchUIPrint(params->font, 96, 62, 400, TEXT, "Add Games");
+	SwitchUIPrint(params->font, 96, 62, 400, TEXT, "Download Romhacks");
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 526, 60, 104, MUTED, "Library");
 	SwitchUIPrint(params->font, 646, 60, 72, MUTED, "Files");
-	SwitchUIPrint(params->font, 734, 60, 110, FOCUS, "Add Games");
+	SwitchUIFontSize(params->font, 15);
+	SwitchUIPrint(params->font, 734, 43, 110, FOCUS, "Download");
+	SwitchUIPrint(params->font, 734, 64, 110, FOCUS, "Romhacks");
 	SwitchUIDrawRect(734, 76, 90, 3, FOCUS);
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 96, 104, 1136, MUTED, "Romhack Plaza • Matching published ROM hashes • Downloads limited to 5 per minute");

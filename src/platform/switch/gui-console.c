@@ -38,7 +38,7 @@ int SwitchUINavigationInput(struct GUIParams* params, unsigned current, bool ent
 		_navigationFocused = false;
 		return -2;
 	}
-	if (tapped && x >= 220) { _navigationFocused = false; return -2; }
+	if (tapped && x >= 220) { _navigationFocused = false; return -3; }
 	if (input & (1U << GUI_INPUT_UP)) _navigationIndex = (_navigationIndex + 4) % 5;
 	if (input & (1U << GUI_INPUT_DOWN)) _navigationIndex = (_navigationIndex + 1) % 5;
 	if (input & (1U << GUI_INPUT_SELECT)) activate = _navigationIndex;
@@ -53,7 +53,7 @@ int SwitchUINavigationInput(struct GUIParams* params, unsigned current, bool ent
 
 void SwitchUINavigationDraw(struct GUIParams* params, unsigned current) {
 	static const unsigned tops[] = { 78, 148, 218, 288, 588 };
-	static const char* labels[] = { "Library", "Files", "Settings", "Add Games", "Exit" };
+	static const char* labels[] = { "Library", "Files", "Settings", "Download Romhacks", "Exit" };
 	static const char* symbols[] = { "", "", "", "", "X" };
 	struct GUIFont* font = params->font;
 	unsigned oldSize = SwitchUIFontSizeGet(font);
@@ -93,8 +93,14 @@ void SwitchUINavigationDraw(struct GUIParams* params, unsigned current) {
 			GUIFontPrint(font, 36, tops[i] + 31, GUI_ALIGN_HCENTER, color, symbols[i]);
 		}
 		if (_navigationFocused) {
-			SwitchUIFontSize(font, 22);
-			GUIFontPrint(font, 72, tops[i] + 31, GUI_ALIGN_LEFT, color, labels[i]);
+			if (i == 3) {
+				SwitchUIFontSize(font, 18);
+				GUIFontPrint(font, 72, tops[i] + 20, GUI_ALIGN_LEFT, color, "Download");
+				GUIFontPrint(font, 72, tops[i] + 40, GUI_ALIGN_LEFT, color, "Romhacks");
+			} else {
+				SwitchUIFontSize(font, 22);
+				GUIFontPrint(font, 72, tops[i] + 31, GUI_ALIGN_LEFT, color, labels[i]);
+			}
 		}
 	}
 	if (_navigationFocused) {
@@ -162,6 +168,9 @@ void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, c
 	SwitchUIHint(font, 444, 701, "Y", "Files");
 	SwitchUIHint(font, 614, 701, "L/R", "First / Last");
 	SwitchUIHint(font, 846, 701, "+", "Settings");
-	SwitchUIHint(font, 1070, 701, "R3", "Add Games");
+	SwitchUIHint(font, 1070, 701, "R3", "");
+	SwitchUIFontSize(font, 16);
+	SwitchUIPrint(font, 1120, 686, 140, CONSOLE_TEXT, "Download");
+	SwitchUIPrint(font, 1120, 706, 140, CONSOLE_TEXT, "Romhacks");
 	SwitchUIFontSize(font, oldSize);
 }
