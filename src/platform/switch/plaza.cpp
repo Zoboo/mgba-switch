@@ -149,6 +149,31 @@ bool SwitchPlazaArtwork(const char* query, std::vector<unsigned char>& image, co
 	} catch (const std::exception& e) { error = e.what(); return false; }
 	return false;
 }
+bool SwitchPlazaArtworkOptions(const char* query, const std::function<bool()>& alive, const std::function<void(const std::string&, const std::vector<unsigned char>&)>& result, std::string& error) {
+	error.clear();
+	if (!initialized || !query || !*query) return false;
+	mutexLock(&lock); std::string token = key; mutexUnlock(&lock);
+	if (token.empty()) { error = "Add a Romhack Plaza API key in Settings first."; return false; }
+	try {
+		romhackplaza::Client client(token);
+		auto progress = [&alive](uint64_t, uint64_t) { return alive(); };
+		auto entries = client.search(query, progress);
+		auto normalize = [](const std::string& title) { std::string result; for (unsigned char c : title) if (std::isalnum(c)) result += std::tolower(c); return result; };
+		std::string needle = normalize(query);
+		std::stable_sort(entries.begin(), entries.end(), [&](const romhackplaza::Entry& a, const romhackplaza::Entry& b) { return (normalize(a.title) == needle) > (normalize(b.title) == needle); });
+		unsigned count = 0;
+		for (const auto& entry : entries) {
+			if (!alive()) return false;
+			if (count++ >= 6) break;
+			auto detail = client.details(entry.id, progress);
+			if (detail.mainImage.empty()) continue;
+			auto image = client.download(detail.mainImage, 8 * 1024 * 1024, progress, false);
+			if (!alive()) return false;
+			if (!image.empty()) result(plainText(entry.title), image);
+		}
+		return alive();
+	} catch (const std::exception& e) { error = e.what(); return false; }
+}
 extern "C" {
 void SwitchPlazaInit(const char* config) { if (initialized || !config || curl_global_init(CURL_GLOBAL_DEFAULT)) return; mutexInit(&lock); condvarInit(&changed); keyPath = std::string(config) + "/romhackplaza.key"; if (!romhackplaza::ReadApiKeyFile(config, key)) { FILE* f = fopen(keyPath.c_str(), "rb"); if (f) { char data[1025]{}; size_t n = fread(data, 1, 1024, f); fclose(f); if (n < 1024) key.assign(data, n); } } running = true; snprintf(state.message, sizeof(state.message), "Add a Romhack Plaza API key, then scan your ROM folder. Downloads: 5 per minute."); if (R_FAILED(threadCreate(&worker, work, nullptr, nullptr, 128 * 1024, 0x3B, -2))) { running = false; curl_global_cleanup(); return; } if (R_FAILED(threadStart(&worker))) { threadClose(&worker); running = false; curl_global_cleanup(); return; } initialized = true; }
 void SwitchPlazaDeinit(void) { if (!initialized) return; mutexLock(&lock); running = false; ++generation; condvarWakeAll(&changed); mutexUnlock(&lock); threadWaitForExit(&worker); threadClose(&worker); candidates.clear(); files.clear(); key.clear(); initialized = false; curl_global_cleanup(); }

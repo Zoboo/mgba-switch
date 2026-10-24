@@ -34,9 +34,11 @@ std::string bulkDirectory;
 std::vector<std::string> bulkRoms;
 void cancelBulkLocked() { bulk = bulkScan = false; bulkRoms.clear(); }
 unsigned generation, activeRevision;
-struct Option { SwitchArtworkOption view; std::string url; };
+struct Option { SwitchArtworkOption view; std::string url; bool cached; };
+SwitchArtworkSource choiceSource = SWITCH_ARTWORK_AUTO;
 std::vector<Option> options;
 bool needsChoice, searching, finished, searchPending, choosePending;
+bool searchBest;
 bool resetPending, resetBanner;
 bool importPending, importBanner, applying;
 std::string importRom, importPath;
@@ -314,6 +316,13 @@ void alternatives(const std::string& rom, const std::string& title, bool cover, 
 	}
 	mutexUnlock(&lock);
 }
+void chooseBestLocked(bool best) {
+	if (!best || options.empty()) return;
+	chosen = 0; applying = choosePending = true;
+	searchPending = searching = needsChoice = finished = false;
+	++generation;
+	condvarWakeAll(&changed);
+}
 void work(void*) {
 	while (true) {
 		mutexLock(&lock);
@@ -341,6 +350,8 @@ void work(void*) {
 		if (attempt) cover = banner = true;
 		if (cleanupOnly) rom.clear();
 		bool search = searchPending, choose = choosePending;
+		bool best = search && searchBest; searchBest = false;
+		SwitchArtworkSource source = search ? choiceSource : SWITCH_ARTWORK_AUTO;
 		std::string query = searchTitle;
 		Option selected = choose && chosen < options.size() ? options[chosen] : Option{};
 		if (search || choose) rom = choiceRom;
@@ -429,7 +440,15 @@ void work(void*) {
 		}
 		if (choose) {
 			std::string bytes;
-			bool ok = fetch(selected.url, "", revision, 8 * 1024 * 1024, bytes);
+			bool ok = false;
+			if (selected.cached) {
+				FILE* file = fopen(selected.view.preview, "rb");
+				struct stat info;
+				if (file && !fstat(fileno(file), &info) && S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= 8 * 1024 * 1024) {
+					bytes.resize(info.st_size); ok = fread(&bytes[0], 1, bytes.size(), file) == bytes.size();
+				}
+				if (file) fclose(file);
+			} else ok = fetch(selected.url, "", revision, 8 * 1024 * 1024, bytes);
 			if (ok && validImage(bytes)) {
 				std::string target = selectionPath(rom, selected.view.banner), temp = target + ".tmp";
 				FILE* file = fopen(temp.c_str(), "wb");
@@ -439,6 +458,34 @@ void work(void*) {
 				ok = ok && current && replaceSelection(temp, target); remove(temp.c_str());
 			} else ok = false;
 			mutexLock(&lock); if (revision == generation) { if (ok) ++imageRevision; finished = true; status = ok ? "Artwork ready" : "Artwork download failed"; } mutexUnlock(&lock);
+			continue;
+		}
+		if (search && (source == SWITCH_ARTWORK_ROMHACKPLAZA || (source == SWITCH_ARTWORK_AUTO && token.empty()))) {
+			message("Searching Romhack Plaza main images...");
+			size_t count = 0;
+			SwitchPlazaArtworkOptions(query.c_str(), [revision, best, &count]() { return currentJob(revision) && (!best || !count); }, [&](const std::string& name, const std::vector<unsigned char>& image) {
+				if (!currentJob(revision)) return;
+				std::string bytes(image.begin(), image.end());
+				std::string path = directory + "/choice-" + std::to_string(revision) + "-" + std::to_string(count) + ".png";
+				bool ok = false;
+				if (validImage(bytes)) {
+					FILE* file = fopen(path.c_str(), "wb"); ok = file && fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size(); if (file && fclose(file)) ok = false;
+				} else if (bytes.size() > 2 && image[0] == 0xFF && image[1] == 0xD8) {
+					ok = SwitchArtworkConvertJPEG(image.data(), image.size(), path.c_str());
+				}
+				struct mImage* decoded = ok ? mImageLoad(path.c_str()) : nullptr;
+				ok = decoded != nullptr;
+				if (decoded) mImageDestroy(decoded);
+				if (!ok || !currentJob(revision)) { remove(path.c_str()); return; }
+				Option option{}; option.cached = true; option.view.banner = banner;
+				snprintf(option.view.title, sizeof(option.view.title), "%s (main image)", name.c_str());
+				snprintf(option.view.preview, sizeof(option.view.preview), "%s", path.c_str());
+				mutexLock(&lock); bool current = revision == generation && running; if (current) options.push_back(option); mutexUnlock(&lock);
+				if (!current) remove(path.c_str()); else ++count;
+			}, plazaError);
+			mutexLock(&lock);
+			if (revision == generation) { searching = false; finished = true; status = !plazaError.empty() ? plazaError : count ? "Choose a main image for this artwork slot" : "No Romhack Plaza main images found"; chooseBestLocked(best); }
+			mutexUnlock(&lock);
 			continue;
 		}
 		message("Contacting SteamGridDB...");
@@ -521,7 +568,7 @@ void work(void*) {
 					}
 				}
 			}
-			mutexLock(&lock); if (revision == generation) { searching = false; finished = true; status = count ? "Choose artwork or cancel" : "No matching artwork found"; } mutexUnlock(&lock);
+			mutexLock(&lock); if (revision == generation) { searching = false; finished = true; status = count ? "Choose artwork or cancel" : "No matching artwork found"; chooseBestLocked(best); } mutexUnlock(&lock);
 			continue;
 		}
 		unsigned id = 0, bestScore = 0;
@@ -588,6 +635,23 @@ bool SwitchArtworkOpen(const char* rom, bool banner) {
 	mutexUnlock(&lock);
 	return true;
 }
+void SwitchArtworkSetSource(SwitchArtworkSource source) {
+	if (!initialized || source < SWITCH_ARTWORK_AUTO || source > SWITCH_ARTWORK_ROMHACKPLAZA) return;
+	mutexLock(&lock);
+	if (!applying && !importPending && !choosePending && choiceSource != source) {
+		choiceSource = source;
+		++generation;
+		searchPending = searching = needsChoice = false;
+		finished = false;
+		discardOptions();
+		condvarWakeAll(&changed);
+	}
+	mutexUnlock(&lock);
+}
+SwitchArtworkSource SwitchArtworkGetSource(void) {
+	if (!initialized) return SWITCH_ARTWORK_AUTO;
+	mutexLock(&lock); SwitchArtworkSource result = choiceSource; mutexUnlock(&lock); return result;
+}
 bool SwitchArtworkImport(const char* rom, const char* path, bool banner) {
 	if (!initialized || !rom || !*rom || strlen(rom) >= 4096 || !path || !*path || strlen(path) >= 4096) return false;
 	mutexLock(&lock);
@@ -621,20 +685,23 @@ bool SwitchArtworkReset(const char* rom, bool banner) {
 void SwitchArtworkSearch(const char* title) {
 	if (!initialized || !title || !*title || strlen(title) > 512) return;
 	mutexLock(&lock);
-	if (!choiceRom.empty() && !key.empty()) {
+	bool plaza = choiceSource == SWITCH_ARTWORK_ROMHACKPLAZA || (choiceSource == SWITCH_ARTWORK_AUTO && key.empty());
+	bool available = plaza ? SwitchPlazaHasKey() : !key.empty();
+	if (!choiceRom.empty() && available) {
+		searchBest = false;
 		searchTitle = title;
 		needsChoice = choosePending = false;
 		searching = searchPending = true;
 		finished = false;
 		percent = 0;
-		status = "Searching SteamGridDB...";
+		status = plaza ? "Searching Romhack Plaza main images..." : "Searching SteamGridDB...";
 		discardOptions();
 		pending.clear();
 		importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation;
 		condvarWakeAll(&changed);
-	} else if (key.empty()) {
+	} else if (!available) {
 		finished = true;
-		status = "Add a SteamGridDB API key in Settings > Artwork to search.";
+		status = plaza ? "Add a Romhack Plaza API key in Settings first." : "Add a SteamGridDB API key in Settings > Artwork to search.";
 	}
 	mutexUnlock(&lock);
 }
@@ -721,6 +788,22 @@ static bool queueArtwork(const char* rom, const char* title, bool exact) {
 	return true;
 }
 bool SwitchArtworkDownloadBest(const char* rom, const char* title) { return queueArtwork(rom, title, false); }
+bool SwitchArtworkDownloadBestFromSource(const char* rom, const char* title, SwitchArtworkSource source) {
+	if (!initialized || !rom || !title || !*title || strlen(title) > 512 || source < SWITCH_ARTWORK_AUTO || source > SWITCH_ARTWORK_ROMHACKPLAZA) return false;
+	mutexLock(&lock);
+	bool plaza = source == SWITCH_ARTWORK_ROMHACKPLAZA || (source == SWITCH_ARTWORK_AUTO && key.empty());
+	bool available = plaza ? SwitchPlazaHasKey() : !key.empty();
+	bool ok = available && choiceRom == rom && !applying && !importPending && !choosePending;
+	if (ok) {
+		choiceSource = source; searchTitle = title; searchBest = searchPending = searching = true;
+		needsChoice = finished = false; percent = 0; pending.clear(); discardOptions();
+		status = plaza ? "Finding the best Romhack Plaza main image..." : "Finding the best SteamGridDB artwork...";
+		cancelBulkLocked(); ++generation; condvarWakeAll(&changed);
+	} else if (!available) {
+		finished = true; status = plaza ? "Add a Romhack Plaza API key in Settings first." : "Add a SteamGridDB API key in Settings > Artwork first.";
+	}
+	mutexUnlock(&lock); return ok;
+}
 bool SwitchArtworkDownloadExact(const char* rom, const char* title) { return queueArtwork(rom, title, true); }
 bool SwitchArtworkDownloadMissing(const char* path) {
 	if (!initialized || !path || !*path || strlen(path) >= 4096) return false;

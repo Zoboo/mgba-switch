@@ -10,17 +10,98 @@
 #define CONSOLE_MUTED 0xFFD0C9C1
 #define CONSOLE_FOCUS 0xFFFFA3BD
 
-static void _railItem(struct GUIFont* font, int top, const char* symbol, const char* label, bool selected) {
-	if (selected)
-		SwitchUIRoundRect(8, top, 56, 48, 9, 0xFF4F3038);
-	SwitchUIFontSize(font, 22);
-	if (!strcmp(symbol, "G") || !strcmp(symbol, "F")) {
-		SwitchUIRailIcon(!strcmp(symbol, "G") ? 0 : 1, selected ? CONSOLE_FOCUS : CONSOLE_TEXT);
-	} else {
-		GUIFontPrint(font, 36, top + 24, GUI_ALIGN_HCENTER, selected ? CONSOLE_FOCUS : CONSOLE_TEXT, symbol);
+static bool _navigationFocused;
+static unsigned _navigationIndex;
+static bool _navigationExit;
+
+bool SwitchUINavigationExitRequested(void) {
+	bool requested = _navigationExit;
+	_navigationExit = false;
+	return requested;
+}
+
+int SwitchUINavigationInput(struct GUIParams* params, unsigned current, bool enter, uint32_t input,
+                            bool tapped, unsigned x, unsigned y) {
+	static const unsigned tops[] = { 78, 148, 218, 288, 588 };
+	int activate = -1;
+	if (tapped && x < (_navigationFocused ? 220U : 72U)) {
+		if (!_navigationFocused) _navigationIndex = current;
+		_navigationFocused = true;
+		for (unsigned i = 0; i < 5; ++i)
+			if (y >= tops[i] && y < tops[i] + 48) { _navigationIndex = i; activate = i; }
+	} else if (!_navigationFocused && enter && (input & (1U << GUI_INPUT_LEFT))) {
+		_navigationFocused = true;
+		_navigationIndex = current;
+		return -2;
+	} else if (!_navigationFocused) return -1;
+	if (input & ((1U << GUI_INPUT_RIGHT) | (1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) {
+		_navigationFocused = false;
+		return -2;
 	}
-	SwitchUIFontSize(font, 12);
-	GUIFontPrint(font, 36, top + 41, GUI_ALIGN_HCENTER, CONSOLE_MUTED, label);
+	if (tapped && x >= 220) { _navigationFocused = false; return -2; }
+	if (input & (1U << GUI_INPUT_UP)) _navigationIndex = (_navigationIndex + 4) % 5;
+	if (input & (1U << GUI_INPUT_DOWN)) _navigationIndex = (_navigationIndex + 1) % 5;
+	if (input & (1U << GUI_INPUT_SELECT)) activate = _navigationIndex;
+	if (activate >= 0) {
+		_navigationFocused = false;
+		GUIInvalidateKeys(params);
+		if (activate == 4) _navigationExit = true;
+		return activate;
+	}
+	return -2;
+}
+
+void SwitchUINavigationDraw(struct GUIParams* params, unsigned current) {
+	static const unsigned tops[] = { 78, 148, 218, 288, 588 };
+	static const char* labels[] = { "Library", "Files", "Settings", "Add Games", "Exit" };
+	static const char* symbols[] = { "", "", "", "", "X" };
+	struct GUIFont* font = params->font;
+	unsigned oldSize = SwitchUIFontSizeGet(font);
+	int width = _navigationFocused ? 220 : 72;
+	SwitchUIDrawRect(0, 0, width, 668, 0xF52B1B21);
+	SwitchUIFontSize(font, _navigationFocused ? 20 : 12);
+	GUIFontPrint(font, _navigationFocused ? 24 : 36, 36,
+	             _navigationFocused ? GUI_ALIGN_LEFT : GUI_ALIGN_HCENTER, CONSOLE_TEXT,
+	             "mGBA");
+	for (unsigned i = 0; i < 5; ++i) {
+		bool focused = _navigationFocused && i == _navigationIndex;
+		uint32_t color = focused || i == current ? CONSOLE_FOCUS : CONSOLE_TEXT;
+		if (focused || i == current)
+			SwitchUIRoundRect(3, tops[i], width - 6, 48, 7, 0xFF4F3038);
+		if (focused) SwitchUIRoundFrame(3, tops[i], width - 6, 48, 7, CONSOLE_FOCUS);
+		if (i == 0) {
+			SwitchUIRoundRect(26, tops[i] + 14, 20, 19, 3, color);
+			SwitchUIDrawRect(30, tops[i] + 18, 12, 7, 0xFF2B1B21);
+		} else if (i == 1) {
+			SwitchUIRoundRect(26, tops[i] + 13, 10, 6, 2, color);
+			SwitchUIRoundRect(26, tops[i] + 17, 20, 16, 2, color);
+		} else if (i == 2) {
+			SwitchUIRoundFrame(27, tops[i] + 15, 18, 18, 7, color);
+			SwitchUIDrawRect(33, tops[i] + 11, 6, 4, color);
+			SwitchUIDrawRect(33, tops[i] + 33, 6, 4, color);
+			SwitchUIDrawRect(23, tops[i] + 21, 4, 6, color);
+			SwitchUIDrawRect(45, tops[i] + 21, 4, 6, color);
+		} else if (i == 3) {
+			SwitchUIDrawRect(34, tops[i] + 11, 4, 16, color);
+			for (int step = 0; step < 4; ++step) {
+				SwitchUIDrawRect(28 + step * 2, tops[i] + 20 + step * 2, 4, 3, color);
+				SwitchUIDrawRect(40 - step * 2, tops[i] + 20 + step * 2, 4, 3, color);
+			}
+			SwitchUIDrawRect(26, tops[i] + 33, 20, 3, color);
+		} else {
+			SwitchUIFontSize(font, 22);
+			GUIFontPrint(font, 36, tops[i] + 31, GUI_ALIGN_HCENTER, color, symbols[i]);
+		}
+		if (_navigationFocused) {
+			SwitchUIFontSize(font, 22);
+			GUIFontPrint(font, 72, tops[i] + 31, GUI_ALIGN_LEFT, color, labels[i]);
+		}
+	}
+	if (_navigationFocused) {
+		SwitchUIFontSize(font, 16);
+		GUIFontPrint(font, 16, 654, GUI_ALIGN_LEFT, CONSOLE_MUTED, "A Open   B Back");
+	}
+	SwitchUIFontSize(font, oldSize);
 }
 
 static void _gameTitle(const struct GUIMenuItem* entry, char* title, size_t size) {
@@ -35,14 +116,6 @@ void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, c
 	(void) scroll;
 	struct GUIFont* font = params->font;
 	unsigned oldSize = SwitchUIFontSizeGet(font);
-	SwitchUIDrawRect(0, 0, 72, 720, 0xDA2B1B21);
-	SwitchUIFontSize(font, 14);
-	GUIFontPrint(font, 36, 36, GUI_ALIGN_HCENTER, CONSOLE_TEXT, "mGBA");
-	_railItem(font, 78, "G", "Library", true);
-	_railItem(font, 148, "F", "Files", false);
-	_railItem(font, 218, "+", "Settings", false);
-	_railItem(font, 288, "+", "Add Games", false);
-	_railItem(font, 588, "X", "Exit", false);
 
 	if (count) {
 		const struct GUIMenuItem* selected = GUIMenuItemListGetConstPointer(&menu->items, entries[position]);

@@ -30,5 +30,6 @@ bool SwitchPlazaInstall(size_t entryIndex, size_t fileIndex);
 #include <vector>
 // Called only by background artwork workers. Main images are not advertised as banners.
 bool SwitchPlazaArtwork(const char* title, std::vector<unsigned char>& image, const std::function<bool()>& current, std::string& error);
+bool SwitchPlazaArtworkOptions(const char* title, const std::function<bool()>& current, const std::function<void(const std::string&, const std::vector<unsigned char>&)>& result, std::string& error);
 #endif
 #endif

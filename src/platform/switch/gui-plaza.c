@@ -72,6 +72,21 @@ bool SwitchUIPlazaRun(struct GUIParams* params, bool* files) {
 	GUIPollInput(params, &input, NULL);
 	unsigned x = params->cx, y = params->cy;
 	bool click = GUIPollCursor(params, &x, &y) == GUI_CURSOR_CLICKED;
+	if (click) { x = params->cx; y = params->cy; }
+	if (!_details) {
+		if (buttons & HidNpadButton_StickL) input |= 1U << GUI_INPUT_LEFT;
+		int navigation = SwitchUINavigationInput(params, 3, true, input, click, x, y);
+		if (navigation != -1) {
+			input = 0; buttons = 0; click = false;
+			if (navigation == 0 || navigation == 1) {
+				*files = navigation == 1;
+				GUIInvalidateKeys(params);
+				return false;
+			}
+			if (navigation == 2) SwitchUIOpenSettings(params);
+			if (navigation == 4) return false;
+		}
+	}
 	if (click) {
 		x = params->cx; y = params->cy;
 		if (y >= 668) {
@@ -83,7 +98,7 @@ bool SwitchUIPlazaRun(struct GUIParams* params, bool* files) {
 		} else if (y >= 24 && y < 80 && x >= 526 && x < 718) {
 			*files = x >= 638;
 			_details = false; GUIInvalidateKeys(params); return false;
-		} else if (!_details && x >= 48 && x < 1232 && y >= 180 && y < 635) {
+		} else if (!_details && x >= 96 && x < 1232 && y >= 180 && y < 635) {
 			size_t index = _index / 7 * 7 + (y - 180) / 65;
 			if (index < state.count) { _index = index; input |= 1U << GUI_INPUT_SELECT; }
 		} else if (_details && x >= 112 && x < 1168 && y >= 436 && y < 592) {
@@ -133,18 +148,18 @@ bool SwitchUIPlazaRun(struct GUIParams* params, bool* files) {
 	params->drawStart(); params->guiPrepare();
 	SwitchUIDrawRect(0, 0, 1280, 720, BASE);
 	SwitchUIFontSize(params->font, 30);
-	SwitchUIPrint(params->font, 48, 62, 400, TEXT, "Add Games");
+	SwitchUIPrint(params->font, 96, 62, 400, TEXT, "Add Games");
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 526, 60, 104, MUTED, "Library");
 	SwitchUIPrint(params->font, 646, 60, 72, MUTED, "Files");
 	SwitchUIPrint(params->font, 734, 60, 110, FOCUS, "Add Games");
 	SwitchUIDrawRect(734, 76, 90, 3, FOCUS);
 	SwitchUIFontSize(params->font, 18);
-	SwitchUIPrint(params->font, 48, 104, 1184, MUTED, "Romhack Plaza • Matching published ROM hashes • Downloads limited to 5 per minute");
-	SwitchUIPrint(params->font, 48, 140, 1184, FOCUS, state.message);
+	SwitchUIPrint(params->font, 96, 104, 1136, MUTED, "Romhack Plaza • Matching published ROM hashes • Downloads limited to 5 per minute");
+	SwitchUIPrint(params->font, 96, 140, 1136, FOCUS, state.message);
 	if (state.busy) {
-		SwitchUIRoundRect(48, 158, 1184, 4, 2, SURFACE);
-		if (state.percent) SwitchUIRoundRect(48, 158, 1184 * state.percent / 100, 4, 2, FOCUS);
+		SwitchUIRoundRect(96, 158, 1136, 4, 2, SURFACE);
+		if (state.percent) SwitchUIRoundRect(96, 158, 1136 * state.percent / 100, 4, 2, FOCUS);
 	}
 	if (_details && state.count) {
 		struct SwitchPlazaEntry entry;
@@ -174,10 +189,10 @@ bool SwitchUIPlazaRun(struct GUIParams* params, bool* files) {
 			struct SwitchPlazaEntry entry;
 			if (!SwitchPlazaGetEntry(i, &entry)) continue;
 			int y = 180 + (i - first) * 65;
-			SwitchUIRoundRect(48, y, 1184, 58, 8, SURFACE);
-			if (i == _index) SwitchUIRoundFrame(48, y, 1184, 58, 8, FOCUS);
+			SwitchUIRoundRect(96, y, 1136, 58, 8, SURFACE);
+			if (i == _index) SwitchUIRoundFrame(96, y, 1136, 58, 8, FOCUS);
 			SwitchUIFontSize(params->font, 22);
-			SwitchUIPrint(params->font, 68, y + 36, 1144, TEXT, entry.title);
+			SwitchUIPrint(params->font, 116, y + 36, 1096, TEXT, entry.title);
 		}
 	} else {
 		SwitchUIFontSize(params->font, 26);
@@ -190,11 +205,12 @@ bool SwitchUIPlazaRun(struct GUIParams* params, bool* files) {
 	}
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIDrawRect(48, 658, 1184, 1, SURFACE);
-	SwitchUIHint(params->font, 48, 699, "B", _details ? "Results" : "Library");
+	SwitchUIHint(params->font, 88, 699, "B", _details ? "Results" : "Library");
 	SwitchUIHint(params->font, 250, 699, "A", _details ? "Install / Retry" : "Details");
 	SwitchUIHint(params->font, 510, 699, "Y", "Scan / Retry");
 	SwitchUIHint(params->font, 780, 699, "+", "API key");
 	SwitchUIHint(params->font, 1030, 699, "X", "Cancel");
+	if (!_details) SwitchUINavigationDraw(params, 3);
 	SwitchUIFontSize(params->font, 24);
 	params->guiFinish(); params->drawEnd();
 	return true;
