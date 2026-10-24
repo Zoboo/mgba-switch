@@ -1451,7 +1451,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		*result = GUI_MENU_EXIT_CANCEL;
 		return true;
 	}
-	if (input & (1U << GUI_INPUT_BACK)) {
+	if (_files && (input & (1U << GUI_INPUT_BACK))) {
 		*result = GUI_MENU_EXIT_BACK;
 		return true;
 	}
