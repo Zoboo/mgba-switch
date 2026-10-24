@@ -24,15 +24,15 @@ list(APPEND GUI_SRC ${CMAKE_CURRENT_SOURCE_DIR}/gui-font.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-achievements.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/gui-updates.c
                     ${CMAKE_CURRENT_SOURCE_DIR}/switch-updater.cpp)
-set(SWITCH_UPDATE_VERSION "1.0.8" CACHE STRING "Switch frontend release version")
+set(SWITCH_UPDATE_VERSION "1.0.9" CACHE STRING "Switch frontend release version")
 find_library(SWITCH_JPEG_LIBRARY jpeg REQUIRED)
 find_library(SWITCH_CURL_LIBRARY curl REQUIRED)
 set(SWITCH_ROMHACKPLAZA_SOURCE_DIR "${PROJECT_SOURCE_DIR}/../romhackplaza" CACHE PATH "Reusable Romhack Plaza module source directory")
 if(NOT EXISTS "${SWITCH_ROMHACKPLAZA_SOURCE_DIR}/CMakeLists.txt")
 	include(FetchContent)
 	FetchContent_Declare(switch_romhackplaza
-	    URL https://codeload.github.com/Zoboo/romhackplaza/tar.gz/2a0607547c3bef5f245dacc59828bd835970c90f
-	    URL_HASH SHA256=1c560192e51caf7b4ca0bda7028fef2f80f5b0bf9a476c5e052aef2517677219)
+	    URL https://codeload.github.com/Zoboo/romhackplaza/tar.gz/1b9d3c5bda5b48446e363d9c1db40f1e1aa7e54c
+	    URL_HASH SHA256=7c1745fbb83cb15bb90a21ad8b936ce80a4280326e2b6ac02acab53299897632)
 	FetchContent_GetProperties(switch_romhackplaza)
 	if(NOT switch_romhackplaza_POPULATED)
 		FetchContent_Populate(switch_romhackplaza)
