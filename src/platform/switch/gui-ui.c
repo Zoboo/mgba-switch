@@ -1716,4 +1716,9 @@ void SwitchUIDeinit(void) {
 	free(_library.games);
 	free(_library.files);
 	memset(&_library, 0, sizeof(_library));
-	glDeleteTexture
+	glDeleteTextures(1, &_white);
+	glDeleteBuffers(1, &_vbo);
+	glDeleteVertexArrays(1, &_vao);
+	glDeleteProgram(_program);
+	_runner = NULL;
+}
