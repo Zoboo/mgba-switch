@@ -80,7 +80,6 @@ static bool _resetBanner, _resetSuccess;
 static char _resetGame[513], _resetMessage[192], _resetNotice[600];
 static u64 _resetNoticeUntil;
 static bool _gameSettingsOpen;
-static bool _addGames;
 static unsigned _plazaInstalled;
 static unsigned _gameSettingsIndex;
 static char _gameSettingsRom[PATH_MAX];
@@ -775,7 +774,7 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 	}
 	if (_pickerPhase == 2 && ((buttons & HidNpadButton_Minus) || (tapped && _inside(x, y, 600, 158, 220, 44)))) {
 		if (!SwitchArtworkHasKey() && !SwitchPlazaHasKey()) {
-			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add a SteamGridDB key in Artwork settings or a Romhack Plaza key in Download Romhacks to download artwork.");
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Add a SteamGridDB key in Artwork settings or a Romhack Plaza key in Settings > Romhack Plaza to download artwork.");
 		} else SwitchArtworkDownloadBestFromSource(rom, _pickerQuery, SwitchArtworkGetSource());
 		GUIInvalidateKeys(params);
 		return true;
@@ -1285,6 +1284,7 @@ static bool _fileSystem(struct GUIParams* params, enum GUIMenuExitReason* result
 bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct GUIMenuState* state,
                          enum GUIMenuExitReason* result) {
 	if (_importingArtwork) return false;
+	if (menu == SwitchUIPlazaMenu()) { SwitchUIPlazaOpen(params, &_runner->config); *result = GUI_MENU_EXIT_BACK; return true; }
 	if (menu == &_fileSystemMenu) return _fileSystem(params, result);
 	if (menu == SwitchUIAchievementsMenu()) return SwitchUIAchievementsRun(params, result);
 	if (menu == SwitchUIUpdatesMenu()) return SwitchUIUpdatesRun(params, result);
@@ -1339,23 +1339,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		_library.menu = NULL;
 		_lastSelection = SIZE_MAX;
 	}
-	if (_addGames) {
-		_addGames = SwitchUIPlazaRun(params, &_files);
-		if (SwitchUINavigationExitRequested()) { *result = GUI_MENU_EXIT_CANCEL; return true; }
-		if (!_addGames) {
-			struct SwitchPlazaState plaza;
-			SwitchPlazaGetState(&plaza);
-			if (_plazaInstalled != plaza.installedRevision) {
-				_romLibraryDirty = true;
-				_plazaInstalled = plaza.installedRevision;
-				if (SwitchUIFilesRefreshLibrary(params, menu)) {
-					_library.menu = NULL;
-				}
-			}
-		}
-		*result = GUI_MENU_CONTINUE;
-		return true;
-	}
+
 	struct SwitchPlazaState plaza;
 	SwitchPlazaGetState(&plaza);
 	if (!_pickerPhase && !_gameSettingsOpen && _plazaInstalled != plaza.installedRevision) {
@@ -1406,15 +1390,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 			input = 0; buttons = 0; tapped = headerTap;
 			if (navigation == 0 || navigation == 1) { _files = navigation == 1; _lastSelection = SIZE_MAX; }
 			if (navigation == 2) SwitchUIOpenSettings(params);
-			if (navigation == 3) { _addGames = true; *result = GUI_MENU_CONTINUE; return true; }
-			if (navigation == 4) { SwitchUINavigationExitRequested(); *result = GUI_MENU_EXIT_CANCEL; return true; }
 		}
-	}
-	if (buttons & HidNpadButton_StickR) {
-		_addGames = true;
-		GUIInvalidateKeys(params);
-		*result = GUI_MENU_CONTINUE;
-		return true;
 	}
 	bool changedFilter = false;
 	if (!_pickerPhase && !_gameSettingsOpen && !carouselBlocked) {
@@ -1842,7 +1818,7 @@ void SwitchUIInit(struct mGUIRunner* runner) {
 		}
 	}
 	_settingsMenu.title = "Settings";
-	GUIMenuItemListInit(&_settingsMenu.items, 6);
+	GUIMenuItemListInit(&_settingsMenu.items, 7);
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
 	    (struct GUIMenuItem) { .title = "Interface", .submenu = &_interfaceMenu };
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
@@ -1851,6 +1827,7 @@ void SwitchUIInit(struct mGUIRunner* runner) {
 	    (struct GUIMenuItem) { .title = "Artwork (SteamGridDB)", .submenu = &_artworkMenu };
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
 	    (struct GUIMenuItem) { .title = "RetroAchievements", .submenu = SwitchUIAchievementsMenu() };
+	*GUIMenuItemListAppend(&_settingsMenu.items) = (struct GUIMenuItem) { .title = "Romhack Plaza", .submenu = SwitchUIPlazaMenu() };
 	*GUIMenuItemListAppend(&_settingsMenu.items) = (struct GUIMenuItem) { .title = "Updates", .submenu = SwitchUIUpdatesMenu() };
 	*GUIMenuItemListAppend(&_settingsMenu.items) = (struct GUIMenuItem) { .title = "Back" };
 }

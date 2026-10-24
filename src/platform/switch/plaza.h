@@ -9,14 +9,20 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-struct SwitchPlazaState { bool busy; unsigned percent, revision, installedRevision; size_t count, fileCount, filesEntry; char message[256], installedPath[4096]; };
+struct SwitchPlazaState { bool busy; unsigned percent, revision, installedRevision, romRevision; size_t count, fileCount, filesEntry; char message[256], installedPath[4096]; };
 struct SwitchPlazaEntry { uint64_t id; char title[256], description[2048], baseRom[4096]; };
+struct SwitchPlazaRom { char title[256], path[4096]; bool checked; };
 struct SwitchPlazaFile { char filename[256]; uint64_t size; };
 void SwitchPlazaInit(const char* configDirectory);
 void SwitchPlazaDeinit(void);
 bool SwitchPlazaHasKey(void);
 bool SwitchPlazaSetKey(const char* key);
 bool SwitchPlazaStartScan(const char* romDirectory);
+bool SwitchPlazaListRoms(const char* const* roots, size_t count);
+size_t SwitchPlazaRomCount(void);
+bool SwitchPlazaGetRom(size_t index, struct SwitchPlazaRom* rom);
+bool SwitchPlazaSetRomChecked(size_t index, bool checked);
+bool SwitchPlazaSearchSelected(void);
 void SwitchPlazaCancel(void);
 void SwitchPlazaGetState(struct SwitchPlazaState* state);
 bool SwitchPlazaGetEntry(size_t index, struct SwitchPlazaEntry* entry);

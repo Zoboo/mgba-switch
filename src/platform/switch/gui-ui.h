@@ -18,6 +18,8 @@ size_t SwitchUIRomDirectoriesGet(const struct mCoreConfig*, const char**, size_t
 bool SwitchUIRomDirectoriesEdit(struct GUIParams*, struct mCoreConfig*);
 bool SwitchUISelectDirectory(struct GUIParams*, const char* initialPath, char* outPath, size_t outLen);
 bool SwitchUIPlazaRun(struct GUIParams*, bool* files);
+struct GUIMenu* SwitchUIPlazaMenu(void);
+void SwitchUIPlazaOpen(struct GUIParams*, const struct mCoreConfig*);
 void SwitchUIAchievementsInit(struct mGUIRunner*, const char* directory);
 void SwitchUIAchievementsDeinit(void);
 struct GUIMenu* SwitchUIAchievementsMenu(void);
@@ -45,7 +47,6 @@ void SwitchUIRailIcon(int kind, uint32_t color);
 int SwitchUINavigationInput(struct GUIParams*, unsigned current, bool enter, uint32_t input,
                             bool tapped, unsigned x, unsigned y);
 void SwitchUINavigationDraw(struct GUIParams*, unsigned current);
-bool SwitchUINavigationExitRequested(void);
 void SwitchUIOpenSettings(struct GUIParams*);
 bool SwitchUILibraryMenu(struct GUIParams*, struct GUIMenu*, struct GUIMenuState*, enum GUIMenuExitReason*);
 void SwitchUIDrawRect(int x, int y, int width, int height, uint32_t color);

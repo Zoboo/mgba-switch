@@ -1088,11 +1088,15 @@ int main(int argc, char* argv[]) {
 				.submenu = SwitchUIAchievementsMenu(),
 			},
 			{
+				.title = "Romhack Plaza",
+				.submenu = SwitchUIPlazaMenu(),
+			},
+			{
 				.title = "Updates",
 				.submenu = SwitchUIUpdatesMenu(),
 			},
 		},
-		.nConfigExtra = 10,
+		.nConfigExtra = 11,
 		.setup = _setup,
 		.teardown = NULL,
 		.gameLoaded = _gameLoaded,

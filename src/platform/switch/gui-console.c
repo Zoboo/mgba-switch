@@ -12,22 +12,15 @@
 
 static bool _navigationFocused;
 static unsigned _navigationIndex;
-static bool _navigationExit;
-
-bool SwitchUINavigationExitRequested(void) {
-	bool requested = _navigationExit;
-	_navigationExit = false;
-	return requested;
-}
 
 int SwitchUINavigationInput(struct GUIParams* params, unsigned current, bool enter, uint32_t input,
                             bool tapped, unsigned x, unsigned y) {
-	static const unsigned tops[] = { 78, 148, 218, 288, 588 };
+	static const unsigned tops[] = { 78, 148, 218 };
 	int activate = -1;
 	if (tapped && x < (_navigationFocused ? 220U : 72U)) {
 		if (!_navigationFocused) _navigationIndex = current;
 		_navigationFocused = true;
-		for (unsigned i = 0; i < 5; ++i)
+		for (unsigned i = 0; i < 3; ++i)
 			if (y >= tops[i] && y < tops[i] + 48) { _navigationIndex = i; activate = i; }
 	} else if (!_navigationFocused && enter && (input & (1U << GUI_INPUT_LEFT))) {
 		_navigationFocused = true;
@@ -39,22 +32,20 @@ int SwitchUINavigationInput(struct GUIParams* params, unsigned current, bool ent
 		return -2;
 	}
 	if (tapped && x >= 220) { _navigationFocused = false; return -3; }
-	if (input & (1U << GUI_INPUT_UP)) _navigationIndex = (_navigationIndex + 4) % 5;
-	if (input & (1U << GUI_INPUT_DOWN)) _navigationIndex = (_navigationIndex + 1) % 5;
+	if (input & (1U << GUI_INPUT_UP)) _navigationIndex = (_navigationIndex + 2) % 3;
+	if (input & (1U << GUI_INPUT_DOWN)) _navigationIndex = (_navigationIndex + 1) % 3;
 	if (input & (1U << GUI_INPUT_SELECT)) activate = _navigationIndex;
 	if (activate >= 0) {
 		_navigationFocused = false;
 		GUIInvalidateKeys(params);
-		if (activate == 4) _navigationExit = true;
 		return activate;
 	}
 	return -2;
 }
 
 void SwitchUINavigationDraw(struct GUIParams* params, unsigned current) {
-	static const unsigned tops[] = { 78, 148, 218, 288, 588 };
-	static const char* labels[] = { "Library", "Files", "Settings", "Download Romhacks", "" };
-	static const char* symbols[] = { "", "", "", "", "X" };
+	static const unsigned tops[] = { 78, 148, 218 };
+	static const char* labels[] = { "Library", "Files", "Settings" };
 	struct GUIFont* font = params->font;
 	unsigned oldSize = SwitchUIFontSizeGet(font);
 	int width = _navigationFocused ? 220 : 72;
@@ -63,7 +54,7 @@ void SwitchUINavigationDraw(struct GUIParams* params, unsigned current) {
 	GUIFontPrint(font, _navigationFocused ? 24 : 36, 36,
 	             _navigationFocused ? GUI_ALIGN_LEFT : GUI_ALIGN_HCENTER, CONSOLE_TEXT,
 	             "mGBA");
-	for (unsigned i = 0; i < 5; ++i) {
+	for (unsigned i = 0; i < 3; ++i) {
 		bool focused = _navigationFocused && i == _navigationIndex;
 		uint32_t color = focused || i == current ? CONSOLE_FOCUS : CONSOLE_TEXT;
 		if (focused || i == current)
@@ -81,26 +72,10 @@ void SwitchUINavigationDraw(struct GUIParams* params, unsigned current) {
 			SwitchUIDrawRect(33, tops[i] + 33, 6, 4, color);
 			SwitchUIDrawRect(23, tops[i] + 21, 4, 6, color);
 			SwitchUIDrawRect(45, tops[i] + 21, 4, 6, color);
-		} else if (i == 3) {
-			SwitchUIDrawRect(34, tops[i] + 11, 4, 16, color);
-			for (int step = 0; step < 4; ++step) {
-				SwitchUIDrawRect(28 + step * 2, tops[i] + 20 + step * 2, 4, 3, color);
-				SwitchUIDrawRect(40 - step * 2, tops[i] + 20 + step * 2, 4, 3, color);
-			}
-			SwitchUIDrawRect(26, tops[i] + 33, 20, 3, color);
-		} else {
-			SwitchUIFontSize(font, 22);
-			GUIFontPrint(font, 36, tops[i] + 31, GUI_ALIGN_HCENTER, color, symbols[i]);
 		}
 		if (_navigationFocused) {
-			if (i == 3) {
-				SwitchUIFontSize(font, 18);
-				GUIFontPrint(font, 72, tops[i] + 20, GUI_ALIGN_LEFT, color, "Download");
-				GUIFontPrint(font, 72, tops[i] + 40, GUI_ALIGN_LEFT, color, "Romhacks");
-			} else {
-				SwitchUIFontSize(font, 22);
-				GUIFontPrint(font, 72, tops[i] + 31, GUI_ALIGN_LEFT, color, labels[i]);
-			}
+			SwitchUIFontSize(font, 22);
+			GUIFontPrint(font, 72, tops[i] + 31, GUI_ALIGN_LEFT, color, labels[i]);
 		}
 	}
 	if (_navigationFocused) {

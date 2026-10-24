@@ -15,6 +15,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <map>
+#include <set>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -33,6 +34,12 @@ std::vector<Candidate> candidates;
 std::vector<romhackplaza::File> files;
 std::vector<std::string> scannedRoms;
 size_t scanCursor;
+struct Rom { std::string path, sha; uint32_t crc; };
+std::vector<Rom> selectableRoms, selectedSearchRoms;
+std::vector<std::string> listingRoots;
+std::set<std::string> selectedHashes;
+std::string selectionPath;
+bool selectionsLoaded, selectionsDirty;
 std::map<std::string, std::vector<romhackplaza::Entry>> searchCache;
 std::map<uint64_t, romhackplaza::Entry> detailCache;
 bool current(unsigned revision) { mutexLock(&lock); bool ok = running && revision == generation; mutexUnlock(&lock); return ok; }
@@ -74,29 +81,66 @@ bool hashFile(const std::string& path, unsigned revision, uint32_t& crc, std::st
 	uint8_t digest[20]; sha1Finalize(digest, &context); char hex[41]; for (unsigned i = 0; i < 20; ++i) snprintf(hex + 2 * i, 3, "%02x", digest[i]); sha = hex; return true;
 }
 bool scan(const std::string& path, unsigned depth, unsigned revision, unsigned& visited, std::vector<std::string>& roms) {
-	if (depth > 16 || visited >= 100000 || !current(revision)) return false;
+	if (depth > 16 || visited >= 100000 || roms.size() >= 10000 || !current(revision)) return false;
 	DIR* d = opendir(path.c_str()); if (!d) return false; bool complete = true;
-	while (dirent* e = readdir(d)) { if (++visited > 100000 || !current(revision)) { complete = false; break; } if (e->d_name[0] == '.') continue;
+	while (dirent* e = readdir(d)) { if (++visited > 100000 || roms.size() >= 10000 || !current(revision)) { complete = false; break; } if (e->d_name[0] == '.') continue;
 		std::string child = path + (path.back() == '/' ? "" : "/") + e->d_name; struct stat st; if (child.size() >= 4096 || lstat(child.c_str(), &st)) { complete = false; continue; }
-		if (S_ISDIR(st.st_mode)) { if (!scan(child, depth + 1, revision, visited, roms)) complete = false; } else if (S_ISREG(st.st_mode)) { size_t dot = child.find_last_of('.'); std::string ext = dot == std::string::npos ? "" : lower(child.substr(dot)); if (ext == ".gba" || ext == ".gb" || ext == ".gbc" || ext == ".agb" || ext == ".sgb") roms.push_back(child); }
+		if (S_ISDIR(st.st_mode)) { if (!scan(child, depth + 1, revision, visited, roms)) complete = false; } else if (S_ISREG(st.st_mode)) { size_t dot = child.find_last_of('.'); std::string ext = dot == std::string::npos ? "" : lower(child.substr(dot)); if (ext == ".gba" || ext == ".gb" || ext == ".gbc" || ext == ".agb" || ext == ".sgb" || ext == ".mb" || ext == ".dmg") roms.push_back(child); }
 	} closedir(d); return complete;
+}
+void saveSelections() {
+	mutexLock(&lock); auto snapshot = selectedHashes; selectionsDirty = false; mutexUnlock(&lock);
+	std::string temp = selectionPath + ".tmp", backup = selectionPath + ".bak";
+	FILE* f = fopen(temp.c_str(), "wb"); bool ok = f != nullptr;
+	if (f) { for (const auto& hash : snapshot) if (fprintf(f, "%s\n", hash.c_str()) < 0) ok = false; if (fclose(f)) ok = false; }
+	struct stat st; bool old = !lstat(selectionPath.c_str(), &st);
+	if (ok && old) { remove(backup.c_str()); ok = !rename(selectionPath.c_str(), backup.c_str()); }
+	if (ok && rename(temp.c_str(), selectionPath.c_str())) { ok = false; if (old) rename(backup.c_str(), selectionPath.c_str()); }
+	remove(temp.c_str()); if (ok) remove(backup.c_str());
+	if (!ok) { mutexLock(&lock); snprintf(state.message, sizeof(state.message), "Could not save selected games. Check SD card free space."); ++state.revision; mutexUnlock(&lock); }
+}
+void loadSelections() {
+	if (selectionsLoaded) return;
+	std::set<std::string> hashes;
+	FILE* f = fopen(selectionPath.c_str(), "rb");
+	if (!f) f = fopen((selectionPath + ".bak").c_str(), "rb");
+	if (f) { char line[128]; unsigned lines = 0; while (lines++ < 100000 && fgets(line, sizeof(line), f)) { std::string hash(line); while (!hash.empty() && std::isspace(static_cast<unsigned char>(hash.back()))) hash.pop_back(); if (hash.size() == 40 && hash.find_first_not_of("0123456789abcdef") == std::string::npos) hashes.insert(hash); } fclose(f); }
+	mutexLock(&lock); selectedHashes = std::move(hashes); selectionsLoaded = true; mutexUnlock(&lock);
 }
 void work(void*) {
 	mutexLock(&lock);
 	while (running) {
-		while (running && !pending) condvarWait(&changed, &lock);
+		while (running && !pending && !selectionsDirty) condvarWait(&changed, &lock);
 		if (!running) break;
+		if (selectionsDirty) { mutexUnlock(&lock); saveSelections(); mutexLock(&lock); continue; }
 		int job = pending; pending = 0; unsigned revision = generation; std::string token = key, root = directory; size_t ei = selectedEntry, fi = selectedFile; Candidate selected; romhackplaza::File file;
-		if (job != 1 && ei < candidates.size()) selected = candidates[ei];
+		auto roots = listingRoots;
+		std::vector<Rom> searchRoms;
+		if (job == 5) searchRoms = selectedSearchRoms;
+		if ((job == 2 || job == 3) && ei < candidates.size()) selected = candidates[ei];
 		if (job == 3 && fi < files.size()) file = files[fi];
 		state.busy = true; state.percent = 0; mutexUnlock(&lock);
 		try {
 			romhackplaza::Client client(token); auto callback = [revision](uint64_t n, uint64_t total) { return progress(revision, n, total); };
-			if (job == 1) {
+			if (job == 4) {
+				loadSelections();
+				message(revision, "Reading ROM folders; games appear as their hashes are checked...");
+				std::vector<std::string> paths; unsigned visited = 0; bool complete = true;
+				for (const auto& path : roots) if (!scan(path, 0, revision, visited, paths)) complete = false;
+				std::sort(paths.begin(), paths.end()); paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+				std::set<std::string> seen;
+				for (size_t i = 0; i < paths.size() && current(revision); ++i) {
+					uint32_t crc; std::string sha; if (!hashFile(paths[i], revision, crc, sha)) continue;
+					if (seen.insert(sha).second) { mutexLock(&lock); if (revision == generation) { selectableRoms.push_back({paths[i], sha, crc}); ++state.romRevision; ++state.revision; } mutexUnlock(&lock); }
+					progress(revision, i + 1, paths.size());
+				}
+				message(revision, complete ? "Choose games to search. Duplicate ROM content is listed once. Archives must be extracted." : "Some folders were unreadable or scan limits reached (10,000 files / 16 subfolders deep). Archives must be extracted.");
+			} else if (job == 1 || job == 5) {
 				message(revision, "Scanning uncompressed GB/GBC/GBA ROMs..."); unsigned visited = 0; bool complete = true;
-				if (scannedRoms.empty()) complete = scan(root, 0, revision, visited, scannedRoms);
+				if (job == 1 && scannedRoms.empty()) complete = scan(root, 0, revision, visited, scannedRoms);
 				for (; scanCursor < scannedRoms.size() && current(revision); ++scanCursor) {
 					const std::string& rom = scannedRoms[scanCursor]; uint32_t crc; std::string sha; if (!hashFile(rom, revision, crc, sha)) continue;
+					if (job == 5 && (sha != searchRoms[scanCursor].sha || crc != searchRoms[scanCursor].crc)) continue;
 					std::string query = title(rom); message(revision, "Finding verified patches for " + query + "...");
 					if (!searchCache.count(query)) searchCache[query] = client.search(query, callback);
 					for (const auto& result : searchCache[query]) { if (!current(revision)) break; if (!detailCache.count(result.id)) detailCache[result.id] = client.details(result.id, callback); const auto& entry = detailCache[result.id]; bool matches = false; char hex[9]; snprintf(hex, sizeof(hex), "%08x", crc);
@@ -104,6 +148,7 @@ void work(void*) {
 						if (!matches) continue;
 						mutexLock(&lock); if (revision == generation && std::none_of(candidates.begin(), candidates.end(), [&entry](const Candidate& c) { return c.entry.id == entry.id; })) { candidates.push_back({entry, rom, crc, sha}); state.count = candidates.size(); ++state.revision; } mutexUnlock(&lock);
 					}
+					if (!current(revision)) break;
 					searchCache.clear(); detailCache.clear();
 				}
 				message(revision, complete ? "Scan finished. Only exact base-ROM hash matches are listed; archives must be extracted first." : "Partial scan finished; some folders were skipped. Archives must be extracted first.");
@@ -116,7 +161,9 @@ void work(void*) {
 				message(revision, "Downloading patch (5 downloads per minute)..."); auto download = client.download(file.url, 64 * 1024 * 1024, callback);
 				if (file.size && download.size() != file.size) throw std::runtime_error("Downloaded patch size does not match the file listing.");
 				message(revision, "Verifying and applying patch to a separate copy..."); std::string installed, error;
-				if (!romhackplaza::InstallPatch(selected.rom, download, root, selected.entry.title, selected.entry.id, crc, installed, error, callback)) throw std::runtime_error(error);
+				size_t slash = selected.rom.find_last_of("/\\");
+				std::string outputRoot = slash == std::string::npos ? root : selected.rom.substr(0, slash + 1);
+				if (!romhackplaza::InstallPatch(selected.rom, download, outputRoot, selected.entry.title, selected.entry.id, crc, installed, error, callback)) throw std::runtime_error(error);
 				mutexLock(&lock); snprintf(state.installedPath, sizeof(state.installedPath), "%s", installed.c_str()); ++state.installedRevision; mutexUnlock(&lock);
 				SwitchArtworkDownloadExact(installed.c_str(), selected.entry.title.c_str()); message(revision, "Installed successfully. The original ROM was not changed.");
 			}
@@ -175,8 +222,8 @@ bool SwitchPlazaArtworkOptions(const char* query, const std::function<bool()>& a
 	} catch (const std::exception& e) { error = e.what(); return false; }
 }
 extern "C" {
-void SwitchPlazaInit(const char* config) { if (initialized || !config || curl_global_init(CURL_GLOBAL_DEFAULT)) return; mutexInit(&lock); condvarInit(&changed); keyPath = std::string(config) + "/romhackplaza.key"; mkdir("sdmc:/mGBA", 0777); if (!romhackplaza::ReadApiKeyFile(config, key)) { FILE* f = fopen(keyPath.c_str(), "rb"); if (f) { char data[1025]{}; size_t n = fread(data, 1, 1024, f); fclose(f); if (n < 1024) key.assign(data, n); } } running = true; snprintf(state.message, sizeof(state.message), key.empty() ? "Add a Romhack Plaza API key, then scan your ROM folder. Downloads: 5 per minute." : "API key loaded. Scan your ROM folder. Downloads: 5 per minute."); if (R_FAILED(threadCreate(&worker, work, nullptr, nullptr, 128 * 1024, 0x3B, -2))) { running = false; curl_global_cleanup(); return; } if (R_FAILED(threadStart(&worker))) { threadClose(&worker); running = false; curl_global_cleanup(); return; } initialized = true; }
-void SwitchPlazaDeinit(void) { if (!initialized) return; mutexLock(&lock); running = false; ++generation; condvarWakeAll(&changed); mutexUnlock(&lock); threadWaitForExit(&worker); threadClose(&worker); candidates.clear(); files.clear(); key.clear(); initialized = false; curl_global_cleanup(); }
+void SwitchPlazaInit(const char* config) { if (initialized || !config || curl_global_init(CURL_GLOBAL_DEFAULT)) return; mutexInit(&lock); condvarInit(&changed); keyPath = std::string(config) + "/romhackplaza.key"; selectionPath = std::string(config) + "/romhackplaza-selected.txt"; mkdir("sdmc:/mGBA", 0777); if (!romhackplaza::ReadApiKeyFile(config, key)) { FILE* f = fopen(keyPath.c_str(), "rb"); if (f) { char data[1025]{}; size_t n = fread(data, 1, 1024, f); fclose(f); if (n < 1024) key.assign(data, n); } } running = true; snprintf(state.message, sizeof(state.message), key.empty() ? "Add a Romhack Plaza API key, then scan your ROM folder. Downloads: 5 per minute." : "API key loaded. Scan your ROM folder. Downloads: 5 per minute."); if (R_FAILED(threadCreate(&worker, work, nullptr, nullptr, 128 * 1024, 0x3B, -2))) { running = false; curl_global_cleanup(); return; } if (R_FAILED(threadStart(&worker))) { threadClose(&worker); running = false; curl_global_cleanup(); return; } initialized = true; }
+void SwitchPlazaDeinit(void) { if (!initialized) return; mutexLock(&lock); running = false; ++generation; condvarWakeAll(&changed); mutexUnlock(&lock); threadWaitForExit(&worker); threadClose(&worker); if (selectionsDirty) saveSelections(); candidates.clear(); files.clear(); selectableRoms.clear(); selectedSearchRoms.clear(); selectedHashes.clear(); selectionsLoaded = false; key.clear(); initialized = false; curl_global_cleanup(); }
 bool SwitchPlazaHasKey(void) { if (!initialized) return false; mutexLock(&lock); bool present = !key.empty(); mutexUnlock(&lock); return present; }
 bool SwitchPlazaSetKey(const char* value) {
 	if (!initialized || !value || strlen(value) > 1023) return false;
@@ -189,7 +236,45 @@ bool SwitchPlazaSetKey(const char* value) {
 	if (ok && rename(temp.c_str(), keyPath.c_str())) { ok = false; if (old) rename(backup.c_str(), keyPath.c_str()); }
 	remove(temp.c_str()); if (ok) { remove(backup.c_str()); mutexLock(&lock); key = value; mutexUnlock(&lock); } return ok;
 }
-bool SwitchPlazaStartScan(const char* path) { if (!initialized || !path || !*path || strlen(path) >= 4096) return false; mutexLock(&lock); bool ok = !state.busy && !pending && !key.empty(); if (ok) { if (directory != path || scanCursor >= scannedRoms.size()) { scannedRoms.clear(); scanCursor = 0; candidates.clear(); searchCache.clear(); detailCache.clear(); state.count = 0; } directory = path; files.clear(); state.fileCount = 0; pending = 1; ++generation; state.busy = true; condvarWakeAll(&changed); } else if (key.empty()) snprintf(state.message, sizeof(state.message), "Enter a Romhack Plaza API key first."); mutexUnlock(&lock); return ok; }
+bool SwitchPlazaStartScan(const char* path) { if (!initialized || !path || !*path || strlen(path) >= 4096) return false; mutexLock(&lock); bool ok = !state.busy && !pending && !key.empty(); if (ok) { bool selectedSearch = !selectedSearchRoms.empty(); selectedSearchRoms.clear(); if (selectedSearch || directory != path || scanCursor >= scannedRoms.size()) { scannedRoms.clear(); scanCursor = 0; candidates.clear(); searchCache.clear(); detailCache.clear(); state.count = 0; } directory = path; files.clear(); state.fileCount = 0; pending = 1; ++generation; state.busy = true; condvarWakeAll(&changed); } else if (key.empty()) snprintf(state.message, sizeof(state.message), "Enter a Romhack Plaza API key first."); mutexUnlock(&lock); return ok; }
+bool SwitchPlazaListRoms(const char* const* roots, size_t count) {
+	if (!initialized || !roots || !count || count > 16) return false;
+	std::vector<std::string> paths; for (size_t i = 0; i < count; ++i) { if (!roots[i] || !*roots[i] || strlen(roots[i]) >= 4096) return false; paths.emplace_back(roots[i]); }
+	mutexLock(&lock); bool ok = !state.busy && !pending;
+	if (ok) { listingRoots = std::move(paths); selectableRoms.clear(); ++state.romRevision; pending = 4; ++generation; state.busy = true; state.percent = 0; condvarWakeAll(&changed); }
+	mutexUnlock(&lock); return ok;
+}
+size_t SwitchPlazaRomCount(void) { if (!initialized) return 0; mutexLock(&lock); size_t count = selectableRoms.size(); mutexUnlock(&lock); return count; }
+bool SwitchPlazaGetRom(size_t index, SwitchPlazaRom* out) {
+	if (!initialized || !out) return false; mutexLock(&lock); bool ok = index < selectableRoms.size();
+	if (ok) { const auto& rom = selectableRoms[index]; *out = {}; textCopy(out->title, sizeof(out->title), title(rom.path)); textCopy(out->path, sizeof(out->path), rom.path); out->checked = selectedHashes.count(rom.sha) != 0; }
+	mutexUnlock(&lock); return ok;
+}
+bool SwitchPlazaSetRomChecked(size_t index, bool checked) {
+	if (!initialized) return false; mutexLock(&lock); bool ok = index < selectableRoms.size();
+	if (ok) { if (checked) selectedHashes.insert(selectableRoms[index].sha); else selectedHashes.erase(selectableRoms[index].sha); selectionsDirty = true; ++state.romRevision; ++state.revision; condvarWakeAll(&changed); }
+	mutexUnlock(&lock); return ok;
+}
+bool SwitchPlazaSearchSelected(void) {
+	if (!initialized) return false; mutexLock(&lock);
+	bool any = std::any_of(selectableRoms.begin(), selectableRoms.end(), [](const Rom& rom) { return selectedHashes.count(rom.sha) != 0; });
+	bool ok = !state.busy && !pending && !key.empty() && any;
+	if (ok) {
+		std::vector<Rom> snapshot;
+		for (const auto& rom : selectableRoms) if (selectedHashes.count(rom.sha)) snapshot.push_back(rom);
+		bool resume = scanCursor < selectedSearchRoms.size() && snapshot.size() == selectedSearchRoms.size() &&
+			std::equal(snapshot.begin(), snapshot.end(), selectedSearchRoms.begin(), [](const Rom& a, const Rom& b) { return a.path == b.path && a.sha == b.sha && a.crc == b.crc; });
+		if (!resume) {
+			selectedSearchRoms = std::move(snapshot); scannedRoms.clear();
+			for (const auto& rom : selectedSearchRoms) scannedRoms.push_back(rom.path);
+			candidates.clear(); state.count = 0; searchCache.clear(); detailCache.clear(); scanCursor = 0;
+		}
+		files.clear(); state.fileCount = 0; pending = 5; state.busy = true; ++generation; condvarWakeAll(&changed);
+	}
+	else if (key.empty()) snprintf(state.message, sizeof(state.message), "Configure a Romhack Plaza API key first.");
+	else if (!any) snprintf(state.message, sizeof(state.message), "Select at least one game in Set Games To Search For.");
+	mutexUnlock(&lock); return ok;
+}
 void SwitchPlazaCancel(void) { if (!initialized) return; mutexLock(&lock); ++generation; if (pending) state.busy = false; pending = 0; snprintf(state.message, sizeof(state.message), "Cancelling; original ROMs are unchanged."); mutexUnlock(&lock); }
 void SwitchPlazaGetState(SwitchPlazaState* out) { if (!out) return; *out = {}; if (!initialized) return; mutexLock(&lock); *out = state; mutexUnlock(&lock); }
 bool SwitchPlazaGetEntry(size_t index, SwitchPlazaEntry* out) { if (!initialized || !out) return false; mutexLock(&lock); bool ok = index < candidates.size(); if (ok) { *out = {}; const auto& c = candidates[index]; out->id = c.entry.id; textCopy(out->title, sizeof(out->title), plainText(c.entry.title)); textCopy(out->description, sizeof(out->description), plainText(c.entry.description)); snprintf(out->baseRom, sizeof(out->baseRom), "%s", c.rom.c_str()); } mutexUnlock(&lock); return ok; }
