@@ -12,9 +12,8 @@
 
 /* Create empty placeholders without ever truncating an existing key. */
 static inline bool SwitchServiceKeyRead(const char* service, std::string& key) {
-	mkdir("sdmc:/switch", 0777);
-	mkdir("sdmc:/switch/mgba", 0777);
-	std::string directory = std::string("sdmc:/switch/mgba/") + service;
+	mkdir("sdmc:/mGBA", 0777);
+	std::string directory = std::string("sdmc:/mGBA/") + service;
 	mkdir(directory.c_str(), 0700);
 	std::string path = directory + "/api-key.txt";
 	int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
