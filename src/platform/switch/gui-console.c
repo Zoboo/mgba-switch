@@ -53,7 +53,7 @@ int SwitchUINavigationInput(struct GUIParams* params, unsigned current, bool ent
 
 void SwitchUINavigationDraw(struct GUIParams* params, unsigned current) {
 	static const unsigned tops[] = { 78, 148, 218, 288, 588 };
-	static const char* labels[] = { "Library", "Files", "Settings", "Download Romhacks", "Exit" };
+	static const char* labels[] = { "Library", "Files", "Settings", "Download Romhacks", "" };
 	static const char* symbols[] = { "", "", "", "", "X" };
 	struct GUIFont* font = params->font;
 	unsigned oldSize = SwitchUIFontSizeGet(font);
