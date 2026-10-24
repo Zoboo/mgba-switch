@@ -310,6 +310,7 @@ void alternatives(const std::string& rom, const std::string& title, bool cover, 
 	mutexLock(&lock);
 	if (revision == generation) {
 		choiceRom = rom; choiceCovers = cover; choiceBanners = banner;
+		choiceSource = SWITCH_ARTWORK_AUTO; searchBest = false;
 		searchTitle = title; searchPending = searching = needsChoice = true;
 		finished = false; status = "Searching closest artwork matches...";
 		condvarWakeAll(&changed);
@@ -542,8 +543,8 @@ void work(void*) {
 			}
 			std::stable_sort(games.begin(), games.end(), [](const Game& a, const Game& b) { return a.score > b.score; });
 			size_t count = 0;
-			for (size_t g = 0; g < games.size() && g < 6 && count < 12; ++g) {
-				for (unsigned kind = 0; kind < 2 && count < 12; ++kind) {
+			for (size_t g = 0; g < games.size() && g < 6 && count < 12 && (!best || !count); ++g) {
+				for (unsigned kind = 0; kind < 2 && count < 12 && (!best || !count); ++kind) {
 					if (kind ? !banner : !cover) continue;
 					rapidjson::Document art;
 					std::string route = (kind ? "heroes/game/" : "grids/game/") + std::to_string(games[g].id) + (kind ? "?mimes=image/png&types=static" : "?dimensions=600x900&mimes=image/png&types=static");
@@ -551,7 +552,7 @@ void work(void*) {
 					unsigned perGame = 0;
 					for (const auto* entry : rankedArt(art)) {
 						const auto& item = *entry;
-						if (count >= 12 || perGame >= 2) break;
+						if (count >= 12 || perGame >= 2 || (best && count)) break;
 						if (!item.IsObject() || !item.HasMember("url") || !item["url"].IsString()) continue;
 						std::string url = item["url"].GetString();
 						if (url.find("https://cdn2.steamgriddb.com/") && url.find("https://cdn.steamgriddb.com/")) continue;
@@ -623,6 +624,7 @@ bool SwitchArtworkGetOption(size_t index, SwitchArtworkOption* option) {
 bool SwitchArtworkOpen(const char* rom, bool banner) {
 	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
 	mutexLock(&lock);
+	searchBest = false;
 	choiceRom = requested = rom;
 	choiceCovers = !banner;
 	choiceBanners = banner;
@@ -640,6 +642,7 @@ void SwitchArtworkSetSource(SwitchArtworkSource source) {
 	mutexLock(&lock);
 	if (!applying && !importPending && !choosePending && choiceSource != source) {
 		choiceSource = source;
+		searchBest = false;
 		++generation;
 		searchPending = searching = needsChoice = false;
 		finished = false;
@@ -709,7 +712,7 @@ void SwitchArtworkChoose(size_t index) {
 	if (!initialized) return; mutexLock(&lock); if (!applying && !importPending && !choosePending && index < options.size()) { applying = true; chosen = index; choosePending = true; searchPending = searching = needsChoice = false; finished = false; importPending = false; cancelBulkLocked(); ++generation; condvarWakeAll(&changed); } mutexUnlock(&lock);
 }
 void SwitchArtworkCancelChoice(void) {
-	if (!initialized) return; mutexLock(&lock); importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation; searchPending = choosePending = searching = needsChoice = false; finished = true; discardOptions(); pending.clear(); status = "Artwork selection cancelled"; condvarWakeAll(&changed); mutexUnlock(&lock);
+	if (!initialized) return; mutexLock(&lock); importPending = searchBest = false; if (!busy) applying = false; cancelBulkLocked(); ++generation; searchPending = choosePending = searching = needsChoice = false; finished = true; discardOptions(); pending.clear(); status = "Artwork selection cancelled"; condvarWakeAll(&changed); mutexUnlock(&lock);
 }
 void SwitchArtworkInit(const char* path) {
 	if (initialized || !path || !*path) return;
