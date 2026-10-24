@@ -131,9 +131,9 @@ void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, c
 		                                                         "Game archive";
 		SwitchUIFontSize(font, 20);
 		GUIFontPrint(font, 700, 164, GUI_ALIGN_HCENTER, CONSOLE_MUTED, platform);
-		unsigned shown = count < 5 ? count : 5;
+		unsigned shown = count - position < 5 ? count - position : 5;
 		for (unsigned slot = 0; slot < shown; ++slot) {
-			size_t index = (position + slot) % count;
+			size_t index = position + slot;
 			const struct GUIMenuItem* entry = GUIMenuItemListGetConstPointer(&menu->items, entries[index]);
 			int x = slot ? 374 + ((int) slot - 1) * 244 : 104;
 			int y = slot ? 268 : 250, w = slot ? 224 : 248, h = slot ? 336 : 368;
@@ -152,13 +152,13 @@ void SwitchUIConsoleDraw(struct GUIParams* params, const struct GUIMenu* menu, c
 		GUIFontPrint(font, 676, 330, GUI_ALIGN_HCENTER, CONSOLE_TEXT, "No games in this view");
 		SwitchUIFontSize(font, 20);
 		GUIFontPrint(font, 676, 374, GUI_ALIGN_HCENTER, CONSOLE_MUTED,
-		             "Use Files to browse your games, or L/R to change the filter.");
+		             "Use Files to browse your games, or L+R to change the filter.");
 	}
 	SwitchUIDrawRect(72, 668, 1208, 52, 0xD4211E1B);
 	SwitchUIHint(font, 104, 701, "A", count ? "Play" : "Browse");
 	SwitchUIHint(font, 280, 701, "B", "Back");
 	SwitchUIHint(font, 444, 701, "Y", "Files");
-	SwitchUIHint(font, 614, 701, "L/R", "Filter");
+	SwitchUIHint(font, 614, 701, "L/R", "First / Last");
 	SwitchUIHint(font, 846, 701, "+", "Settings");
 	SwitchUIHint(font, 1070, 701, "R3", "Add Games");
 	SwitchUIFontSize(font, oldSize);

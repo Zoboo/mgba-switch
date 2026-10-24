@@ -1066,7 +1066,7 @@ static void _libraryHeader(struct GUIParams* params, bool files) {
 	}
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 88, 104, 950, UI_MUTED,
-	              files ? params->currentPath : "Game Boy Advance  /  Game Boy Color  /  Game Boy");
+	              files ? params->currentPath : "Game Boy Advance  /  Game Boy Color  /  Game Boy  |  L+R: filter");
 	char count[48];
 	size_t total = files ? _library.nFiles : _library.nGames;
 	snprintf(count, sizeof(count), "%zu %s", total,
@@ -1079,7 +1079,7 @@ static void _libraryFooter(struct GUIParams* params, bool files, const char* act
 	SwitchUIHint(params->font, 88, 699, "A", action);
 	SwitchUIHint(params->font, 248, 699, "B", "Back");
 	SwitchUIHint(params->font, 364, 699, "Y", files ? "Library" : "Files");
-	SwitchUIHint(params->font, 560, 699, "L/R", "Filter");
+	SwitchUIHint(params->font, 560, 699, "L/R", "First / Last");
 	SwitchUIHint(params->font, 800, 699, "+", "Settings");
 	SwitchUIHint(params->font, 1050, 699, "R3", "Add Games");
 }
@@ -1180,8 +1180,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	if (!_pickerPhase && !_gameSettingsOpen) {
 		const size_t* navEntries = _files ? _library.files : _library.games;
 		size_t navCount = _files ? _library.nFiles : _library.nGames;
-		bool shortcut = buttons & HidNpadButton_StickL;
-		bool enter = shortcut || _files || _layout || !navCount || !_position(menu->index, navEntries, navCount);
+		bool enter = _files || !navCount || !_position(menu->index, navEntries, navCount);
+		bool shortcut = enter && (buttons & HidNpadButton_StickL);
 		if (shortcut) input |= 1U << GUI_INPUT_LEFT;
 		int navigation = SwitchUINavigationInput(params, _files ? 1 : 0, enter, input, tapped, cx, cy);
 		if (navigation != -1) {
@@ -1201,6 +1201,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		*result = GUI_MENU_CONTINUE;
 		return true;
 	}
+	bool cycleFilter = (buttons & (HidNpadButton_L | HidNpadButton_R)) &&
+	    (padGetButtons(&_pad) & (HidNpadButton_L | HidNpadButton_R)) == (HidNpadButton_L | HidNpadButton_R);
 	if (tapped) {
 		if (!_layout || _files) {
 			if (_inside(cx, cy, 526, 24, 104, 58))
@@ -1211,7 +1213,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 				if (_inside(cx, cy, 854 + i * 94, 24, 82, 54))
 					_filter = i;
 		} else if (_inside(cx, cy, 1080, 24, 152, 48))
-			buttons |= HidNpadButton_R;
+			cycleFilter = true;
 		if (cy >= 664 && _layout && !_files) {
 			if (_inside(cx, cy, 96, 668, 160, 52))
 				input |= 1U << GUI_INPUT_SELECT;
@@ -1220,7 +1222,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 			else if (_inside(cx, cy, 436, 668, 160, 52))
 				buttons |= HidNpadButton_Y;
 			else if (_inside(cx, cy, 606, 668, 214, 52))
-				buttons |= HidNpadButton_R;
+				buttons |= cx < 713 ? HidNpadButton_L : HidNpadButton_R;
 			else if (_inside(cx, cy, 838, 668, 220, 52))
 				buttons |= HidNpadButton_Plus;
 			else if (_inside(cx, cy, 1092, 668, 140, 52))
@@ -1233,7 +1235,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 			else if (cx < 540)
 				buttons |= HidNpadButton_Y;
 			else if (cx < 760)
-				buttons |= HidNpadButton_R;
+				buttons |= cx < 650 ? HidNpadButton_L : HidNpadButton_R;
 			else if (cx < 1030)
 				buttons |= HidNpadButton_Plus;
 			else
@@ -1244,8 +1246,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		_files = !_files;
 		_lastSelection = SIZE_MAX;
 	}
-	if (buttons & (HidNpadButton_L | HidNpadButton_R))
-		_filter = (_filter + ((buttons & HidNpadButton_L) ? 3 : 1)) % 4;
+	if (cycleFilter)
+		_filter = (_filter + 1) % 4;
 	if (!_indexLibrary(params, menu))
 		return false;
 	if (buttons & HidNpadButton_Plus) {
@@ -1268,10 +1270,14 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 	size_t position = _position(menu->index, entries, count);
 	if (count)
 		menu->index = entries[position];
-	if (count && (input & ((1U << GUI_INPUT_LEFT) | (1U << GUI_INPUT_UP))))
-		position = (position + count - 1) % count;
-	if (count && (input & ((1U << GUI_INPUT_RIGHT) | (1U << GUI_INPUT_DOWN))))
-		position = (position + 1) % count;
+	if (position && (input & ((1U << GUI_INPUT_LEFT) | (1U << GUI_INPUT_UP))))
+		--position;
+	if (position + 1 < count && (input & ((1U << GUI_INPUT_RIGHT) | (1U << GUI_INPUT_DOWN))))
+		++position;
+	if (count && !cycleFilter) {
+		if (buttons & HidNpadButton_L) position = 0;
+		if (buttons & HidNpadButton_R) position = count - 1;
+	}
 	if (_lastSelection == SIZE_MAX || fabsf(_scroll - (float) position) > 3.f)
 		_scroll = position;
 	_scroll += ((float) position - _scroll) * 0.22f;
@@ -1291,13 +1297,13 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		}
 	} else if (tapped) {
 		if (_layout && count) {
-			unsigned shown = count < 5 ? count : 5;
+			unsigned shown = count - position < 5 ? count - position : 5;
 			for (unsigned slot = 0; slot < shown; ++slot) {
 				int left = slot ? 374 + (slot - 1) * 244 : 104;
 				if (_inside(cx, cy, left, slot ? 268 : 250, slot ? 224 : 248, slot ? 336 : 368)) {
 					if (!slot)
 						input |= 1U << GUI_INPUT_SELECT;
-					position = (position + slot) % count;
+					position += slot;
 					break;
 				}
 			}
@@ -1309,7 +1315,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 			unsigned shown = count < 5 ? count : 5;
 			for (unsigned slot = 0; slot < shown; ++slot) {
 				int ordinal = first + slot;
-				size_t index = (ordinal % (int) count + (int) count) % count;
+				if (ordinal < 0 || (size_t) ordinal >= count) continue;
+				size_t index = ordinal;
 				int x = 528 + (ordinal - center) * 224;
 				if (_inside(cx, cy, x, 248, 224, 336)) {
 					if (index == position)
@@ -1377,7 +1384,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		SwitchUIConsoleDraw(params, menu, entries, count, position, _scroll);
 		const char* filters[] = { "All games", "GBA", "GBC", "GB" };
 		SwitchUIFontSize(params->font, 18);
-		GUIFontPrint(params->font, 1216, 52, GUI_ALIGN_RIGHT, UI_FOCUS, filters[_filter]);
+		GUIFontPrintf(params->font, 1216, 52, GUI_ALIGN_RIGHT, UI_FOCUS, "L+R: %s", filters[_filter]);
 		if (!count && (input & (1U << GUI_INPUT_SELECT)))
 			_files = true;
 		SwitchUIFontSize(params->font, 24);
@@ -1444,7 +1451,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		unsigned shown = count < 5 ? count : 5;
 		for (unsigned slot = 0; slot < shown; ++slot) {
 			int ordinal = first + slot;
-			size_t index = (ordinal % (int) count + (int) count) % count;
+			if (ordinal < 0 || (size_t) ordinal >= count) continue;
+			size_t index = ordinal;
 			const struct GUIMenuItem* entry = GUIMenuItemListGetConstPointer(&menu->items, entries[index]);
 			float distance = count < 5 ? (index == position ? 0 : 1) : fminf(fabsf(ordinal - _scroll), 1.f);
 			int w = 224 - distance * 20, h = w * 3 / 2;
