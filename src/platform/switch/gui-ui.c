@@ -39,7 +39,7 @@ static bool _importingArtwork;
 static char _focusPath[PATH_MAX];
 static char _bannerRom[PATH_MAX];
 static float _bannerOpacity;
-static struct GUIMenu _artworkMenu;
+static struct GUIMenu _artworkMenu, _steamArtworkMenu, _localArtworkMenu;
 static struct GUIMenu _interfaceMenu, _fileSystemMenu, _settingsMenu;
 static unsigned _fileSystemIndex;
 static bool _romDirectoryChanged;
@@ -82,6 +82,7 @@ static u64 _resetNoticeUntil;
 static bool _gameSettingsOpen;
 static unsigned _plazaInstalled;
 static unsigned _gameSettingsIndex;
+static bool _gameSettingsLocalNotice;
 static char _gameSettingsRom[PATH_MAX];
 static struct SwitchGameSettings _gameSettings;
 
@@ -610,11 +611,11 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 		GUIInvalidateKeys(params);
 		return true;
 	}
-	if (input & (1U << GUI_INPUT_UP)) _gameSettingsIndex = (_gameSettingsIndex + 4) % 5;
-	if (input & (1U << GUI_INPUT_DOWN)) _gameSettingsIndex = (_gameSettingsIndex + 1) % 5;
+	if (input & (1U << GUI_INPUT_UP)) _gameSettingsIndex = (_gameSettingsIndex + 5) % 6;
+	if (input & (1U << GUI_INPUT_DOWN)) _gameSettingsIndex = (_gameSettingsIndex + 1) % 6;
 	bool activate = input & (1U << GUI_INPUT_SELECT);
-	if (tapped && _inside(x, y, 216, 220, 848, 330)) {
-		_gameSettingsIndex = (y - 220) / 66;
+	if (tapped && _inside(x, y, 216, 220, 848, 324)) {
+		_gameSettingsIndex = (y - 220) / 54;
 		activate = true;
 	}
 	if (activate) {
@@ -625,6 +626,12 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 			if (extension) *extension = 0;
 			_pickerOpen(params, _gameSettingsRom, _gameSettingsIndex == 1);
 		} else if (_gameSettingsIndex == 2) {
+			if (GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
+			    "Assign matching local covers and banners to this game? Existing matched artwork will be replaced.") == GUI_MENU_EXIT_ACCEPT) {
+				_gameSettingsLocalNotice = SwitchArtworkApplyLocalGame(_gameSettingsRom, false);
+				if (!_gameSettingsLocalNotice) GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Another artwork task is active. Wait or cancel it in Artwork settings.");
+			}
+		} else if (_gameSettingsIndex == 3) {
 			SwkbdConfig keyboard;
 			if (R_SUCCEEDED(swkbdCreate(&keyboard, 0))) {
 				swkbdConfigMakePresetDefault(&keyboard);
@@ -639,7 +646,7 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 					else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save settings. Choose an existing writable sdmc:/ folder.");
 				}
 			}
-		} else if (_gameSettingsIndex == 3) {
+		} else if (_gameSettingsIndex == 4) {
 			const char* extensions[] = { "", ".sav", ".srm", ".dat" };
 			unsigned index = 0;
 			while (index < 3 && strcmp(_gameSettings.extension, extensions[index])) ++index;
@@ -647,7 +654,7 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 			strlcpy(next.extension, extensions[(index + 1) % 4], sizeof(next.extension));
 			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
 			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
-		} else if (_gameSettingsIndex == 4) {
+		} else if (_gameSettingsIndex == 5) {
 			struct SwitchGameSettings next = { 0 };
 			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
 			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
@@ -666,15 +673,21 @@ static void _gameSettingsDraw(struct GUIParams* params) {
 	const char* name = strrchr(_gameSettingsRom, '/');
 	SwitchUIFontSize(params->font, 20);
 	SwitchUIPrint(params->font, 216, 184, 848, UI_FOCUS, name ? name + 1 : _gameSettingsRom);
-	const char* labels[] = { "Change cover", "Change banner", "Save folder", "Save file extension (raw saves only)", "Restore default save settings" };
-	for (unsigned i = 0; i < 5; ++i) {
-		int top = 220 + 66 * i;
-		if (_gameSettingsIndex == i) SwitchUIRoundFrame(212, top, 856, 60, 8, UI_FOCUS);
+	const char* labels[] = { "Change cover", "Change banner", "Assign local artwork", "Save folder", "Save file extension (raw saves only)", "Restore default save settings" };
+	for (unsigned i = 0; i < 6; ++i) {
+		int top = 220 + 54 * i;
+		if (_gameSettingsIndex == i) SwitchUIRoundFrame(212, top, 856, 48, 8, UI_FOCUS);
 		SwitchUIFontSize(params->font, 20);
 		SwitchUIPrint(params->font, 232, top + 25, 808, UI_TEXT, labels[i]);
-		const char* value = i == 2 ? (_gameSettings.directory[0] ? _gameSettings.directory : "Default save folder") :
-		                    i == 3 ? (_gameSettings.extension[0] ? _gameSettings.extension : "Default (.sav or configured player slot)") : NULL;
+		const char* value = i == 3 ? (_gameSettings.directory[0] ? _gameSettings.directory : "Default save folder") :
+		                    i == 4 ? (_gameSettings.extension[0] ? _gameSettings.extension : "Default (.sav or configured player slot)") : NULL;
 		if (value) { SwitchUIFontSize(params->font, 16); SwitchUIPrint(params->font, 232, top + 48, 808, UI_MUTED, value); }
+	}
+	if (_gameSettingsLocalNotice) {
+		struct SwitchArtworkState local;
+		SwitchArtworkGetState(&local);
+		SwitchUIFontSize(params->font, 16);
+		SwitchUIPrint(params->font, 216, 562, 848, UI_FOCUS, local.message);
 	}
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 216, 580, 848, UI_MUTED, "Save changes apply next launch. Existing save files are not moved or converted.");
@@ -953,6 +966,92 @@ static void _pickerDraw(struct GUIParams* params) {
 	_resetNoticeDraw(params);
 }
 
+static bool _artworkPages(struct GUIParams* params, struct GUIMenu* menu, struct GUIMenuState* state,
+                          enum GUIMenuExitReason* result) {
+	bool local = menu == &_localArtworkMenu;
+	struct SwitchArtworkState progress;
+	SwitchArtworkGetState(&progress);
+	unsigned rows = local && progress.local ? 3 : 2;
+	if (menu->index >= rows) menu->index = rows - 1;
+	uint32_t input = 0;
+	GUIPollInput(params, &input, NULL);
+	unsigned x, y;
+	bool tap = _tap(params, &x, &y);
+	if ((input & ((1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) ||
+	    (tap && _inside(x, y, 48, 664, 200, 56))) {
+		if (_runner->core) SwitchArtworkSuspend();
+		*result = GUI_MENU_EXIT_BACK;
+		return true;
+	}
+	if (input & (1U << GUI_INPUT_UP)) menu->index = (menu->index + rows - 1) % rows;
+	if (input & (1U << GUI_INPUT_DOWN)) menu->index = (menu->index + 1) % rows;
+	bool activate = input & (1U << GUI_INPUT_SELECT);
+	if (tap && _inside(x, y, 408, 226, 784, rows * 72)) {
+		unsigned row = (y - 226) / 72;
+		if (y < 226 + row * 72 + 44) { menu->index = row; activate = true; }
+	}
+	if (activate) {
+		if (!local) {
+			state->resultItem = GUIMenuItemListGetPointer(&menu->items, menu->index);
+			*result = GUI_MENU_ENTER;
+			return true;
+		}
+		if (menu->index == 2) SwitchArtworkCancelLocal();
+		else if (!progress.busy && !progress.bulk && !progress.applying && !progress.searching) {
+			bool accepted = menu->index || GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
+			    "Assign local covers and banners to all games? Existing artwork is replaced only when a local image matches.") == GUI_MENU_EXIT_ACCEPT;
+			if (accepted) {
+				const char* roots[16];
+				size_t count = SwitchUIRomDirectoriesGet(&_runner->config, roots, 16);
+				if (!count) { roots[0] = params->currentPath; count = 1; }
+				if (!SwitchArtworkApplyLocal(roots, count, menu->index == 1))
+					GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not start local artwork assignment. Wait for the current artwork task to finish.");
+			}
+		} else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "An artwork task is active. Wait for it to finish.");
+		GUIInvalidateKeys(params);
+	}
+	SwitchArtworkGetState(&progress);
+	params->drawStart(); params->guiPrepare();
+	SwitchUIDrawRect(0, 0, 1280, 720, UI_BASE);
+	SwitchUIFontSize(params->font, 30);
+	SwitchUIPrint(params->font, 48, 66, 300, UI_TEXT, "Settings");
+	SwitchUIRoundRect(40, 140, 280, 48, 8, UI_SURFACE);
+	SwitchUIFontSize(params->font, 22);
+	SwitchUIPrint(params->font, 62, 172, 238, UI_FOCUS, "Artwork");
+	SwitchUIDrawRect(360, 112, 1, 512, 0xFF38332D);
+	SwitchUIFontSize(params->font, 28);
+	SwitchUIPrint(params->font, 408, 142, 784, UI_TEXT, local ? "Local artwork" : "Artwork");
+	SwitchUIFontSize(params->font, 18);
+	SwitchUIPrint(params->font, 408, 184, 784, UI_MUTED,
+	              local ? "Shared image directory: /mGBA/artwork" : "Choose an artwork source.");
+	_button(params->font, 408, 226, 784, local ? "Apply to all" : "SteamGridDB", menu->index == 0);
+	_button(params->font, 408, 298, 784, local ? "Apply to all missing artwork" : "Local", menu->index == 1);
+	if (local) {
+		if (progress.local) _button(params->font, 408, 370, 784, "Cancel local assignment", menu->index == 2);
+		SwitchUIFontSize(params->font, 18);
+		SwitchUIPrint(params->font, 408, 450, 784, UI_MUTED, "Match image names to ROM titles. Ambiguous matches are skipped.");
+		SwitchUIPrint(params->font, 408, 484, 784, UI_MUTED, "Use Game.cover.png or Game.banner.jpg; PNG, JPG and JPEG work.");
+		SwitchUIPrint(params->font, 408, 518, 784, UI_MUTED, "Scans every configured ROM folder. Per-game choices are in Game Settings.");
+		SwitchUIPrint(params->font, 408, 572, 784, UI_FOCUS, progress.message);
+		if (progress.local) {
+			char scope[96];
+			snprintf(scope, sizeof(scope), "%u / %u games processed", progress.bulkDone, progress.bulkTotal);
+			SwitchUIPrint(params->font, 408, 610, 784, UI_MUTED, scope);
+			unsigned percent = progress.bulkTotal ? 100 * progress.bulkDone / progress.bulkTotal : progress.percent;
+			if (percent > 100) percent = 100;
+			SwitchUIRoundRect(408, 590, 784, 4, 2, UI_SURFACE);
+			if (percent) SwitchUIRoundRect(408, 590, 784 * percent / 100, 4, 2, UI_FOCUS);
+		}
+	}
+	SwitchUIDrawRect(48, 658, 1184, 1, 0xFF38332D);
+	SwitchUIHint(params->font, 48, 696, "B", "Back");
+	SwitchUIHint(params->font, 1040, 696, "A", "Select");
+	SwitchUIFontSize(params->font, 24);
+	params->guiFinish(); params->drawEnd();
+	*result = GUI_MENU_CONTINUE;
+	return true;
+}
+
 static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMenuExitReason* result) {
 	struct SwitchArtworkState progress;
 	SwitchArtworkGetState(&progress);
@@ -1013,6 +1112,11 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 		*result = GUI_MENU_EXIT_BACK;
 		return true;
 	}
+	if (activate && progress.local) {
+		GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Local artwork assignment is active. Wait for it to finish, or cancel it on the Local page.");
+		GUIInvalidateKeys(params);
+		activate = false;
+	}
 	if (activate) {
 		switch (menu->index) {
 		case 0:
@@ -1056,7 +1160,7 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 	SwitchUIPrint(params->font, 62, 172, 238, UI_FOCUS, "Artwork");
 	SwitchUIDrawRect(360, 112, 1, 512, 0xFF38332D);
 	SwitchUIFontSize(params->font, 28);
-	SwitchUIPrint(params->font, 408, 142, 784, UI_TEXT, "Artwork");
+	SwitchUIPrint(params->font, 408, 142, 784, UI_TEXT, "SteamGridDB");
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 408, 184, 784, UI_MUTED, "SteamGridDB  /  optional artwork downloads");
 	SwitchUIPrint(params->font, 408, 212, 600, UI_MUTED, "API key");
@@ -1084,14 +1188,15 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 		if (menu->index == i + 3)
 			SwitchUIRoundFrame(1114, top, 76, 44, 20, UI_FOCUS);
 	}
-	_button(params->font, 408, 532, 784, progress.bulk ? "Cancel library artwork downloads" :
+	_button(params->font, 408, 532, 784, progress.local ? "Local assignment active (manage in Local)" : progress.bulk ? "Cancel library artwork downloads" :
 	        "Download all missing covers and banners", menu->index == 5);
 	char status[160];
 	SwitchArtworkStatus(status, sizeof(status));
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 408, 598, 784, UI_FOCUS, status);
 	char scope[160];
-	if (progress.bulk) snprintf(scope, sizeof(scope), "%u / %u games processed — downloads continue while browsing", progress.bulkDone, progress.bulkTotal);
+	if (progress.local) snprintf(scope, sizeof(scope), "Local assignment is active; open Local to view progress or cancel.");
+	else if (progress.bulk) snprintf(scope, sizeof(scope), "%u / %u games processed — downloads continue while browsing", progress.bulkDone, progress.bulkTotal);
 	else snprintf(scope, sizeof(scope), "Scans the current library folder and subfolders. Existing images are kept.");
 	SwitchUIPrint(params->font, 408, 630, 784, UI_MUTED, scope);
 	SwitchUIDrawRect(48, 658, 1184, 1, 0xFF38332D);
@@ -1328,8 +1433,10 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		*result = GUI_MENU_CONTINUE;
 		return true;
 	}
-	if (menu == &_artworkMenu)
+	if (menu == &_steamArtworkMenu)
 		return _artwork(params, menu, result);
+	if (menu == &_artworkMenu || menu == &_localArtworkMenu)
+		return _artworkPages(params, menu, state, result);
 	if (!_runner || _runner->core || !menu->title || strcmp(menu->title, "Select file"))
 		return false;
 	struct GUIMenu* fileMenu = menu;
@@ -1542,6 +1649,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		if (SwitchGameSettingsLoad(_gameSettingsRom, &_gameSettings)) {
 			_gameSettingsOpen = true;
 			_gameSettingsIndex = 0;
+			_gameSettingsLocalNotice = false;
 		} else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not read game settings. Check SD card access.");
 		GUIInvalidateKeys(params);
 		input = 0;
@@ -1794,8 +1902,14 @@ void SwitchUIInit(struct mGUIRunner* runner) {
 	value = 0;
 	mCoreConfigGetIntValue(&runner->config, "switch.artwork.banners", &value);
 	_banners = value != 0;
-	_artworkMenu.title = "Artwork (SteamGridDB)";
-	GUIMenuItemListInit(&_artworkMenu.items, 0);
+	_artworkMenu.title = "Artwork";
+	GUIMenuItemListInit(&_artworkMenu.items, 2);
+	_steamArtworkMenu.title = "SteamGridDB";
+	GUIMenuItemListInit(&_steamArtworkMenu.items, 0);
+	_localArtworkMenu.title = "Local";
+	GUIMenuItemListInit(&_localArtworkMenu.items, 0);
+	*GUIMenuItemListAppend(&_artworkMenu.items) = (struct GUIMenuItem) { .title = "SteamGridDB", .submenu = &_steamArtworkMenu };
+	*GUIMenuItemListAppend(&_artworkMenu.items) = (struct GUIMenuItem) { .title = "Local", .submenu = &_localArtworkMenu };
 	_layout = 0;
 	mCoreConfigGetUIntValue(&runner->config, "switch.interface.layout", &_layout);
 	_layout = _layout == 1;
@@ -1824,7 +1938,7 @@ void SwitchUIInit(struct mGUIRunner* runner) {
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
 	    (struct GUIMenuItem) { .title = "File System", .submenu = &_fileSystemMenu };
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
-	    (struct GUIMenuItem) { .title = "Artwork (SteamGridDB)", .submenu = &_artworkMenu };
+	    (struct GUIMenuItem) { .title = "Artwork", .submenu = &_artworkMenu };
 	*GUIMenuItemListAppend(&_settingsMenu.items) =
 	    (struct GUIMenuItem) { .title = "RetroAchievements", .submenu = SwitchUIAchievementsMenu() };
 	*GUIMenuItemListAppend(&_settingsMenu.items) = (struct GUIMenuItem) { .title = "Romhack Plaza", .submenu = SwitchUIPlazaMenu() };
@@ -1840,6 +1954,8 @@ void SwitchUIDeinit(void) {
 	SwitchArtworkDeinit();
 	SwitchPlazaDeinit();
 	GUIMenuItemListDeinit(&_artworkMenu.items);
+	GUIMenuItemListDeinit(&_steamArtworkMenu.items);
+	GUIMenuItemListDeinit(&_localArtworkMenu.items);
 	GUIMenuItemListDeinit(&_interfaceMenu.items);
 	GUIMenuItemListDeinit(&_fileSystemMenu.items);
 	for (size_t i = 1; i < GUIMenuItemListSize(&_romLibraryMenu.items); ++i)

@@ -30,10 +30,13 @@ bool pendingAttempt;
 bool pendingExact;
 std::string plazaError;
 bool bulk, bulkScan, bulkPartial;
+bool localPending, localActive, localMissingOnly;
+std::vector<std::string> localRoots;
+std::string localGame;
 unsigned bulkDone, bulkTotal;
 std::string bulkDirectory;
 std::vector<std::string> bulkRoms;
-void cancelBulkLocked() { bulk = bulkScan = false; bulkRoms.clear(); }
+void cancelBulkLocked() { bulk = bulkScan = localPending = localActive = false; bulkRoms.clear(); }
 unsigned generation, activeRevision;
 struct Option { SwitchArtworkOption view; std::string url; bool cached; };
 SwitchArtworkSource choiceSource = SWITCH_ARTWORK_AUTO;
@@ -253,7 +256,7 @@ struct Job {
 	~Job() {
 		mutexLock(&lock);
 		busy = false;
-		if (!choosePending && !importPending && !pendingAttempt) applying = false;
+		if (!choosePending && !importPending && !localPending && !pendingAttempt) applying = false;
 		if (bulkItem && bulk && revision == generation) {
 			++bulkDone;
 			if (bulkDone == bulkTotal) {
@@ -280,19 +283,19 @@ bool plazaArtwork(const std::string& rom, const std::string& title, unsigned rev
 	ok = ok && currentJob(revision) && !rename(temporary.c_str(), target.c_str()); remove(temporary.c_str());
 	if (ok) { mutexLock(&lock); ++imageRevision; mutexUnlock(&lock); } return ok;
 }
-bool scanRoms(const std::string& path, unsigned depth, unsigned revision, unsigned& visited, std::vector<std::string>& roms) {
+bool scanRoms(const std::string& path, unsigned depth, unsigned revision, unsigned& visited, std::vector<std::string>& roms, bool all = false) {
 	if (depth > 16 || visited >= 100000 || !currentJob(revision)) return false;
 	DIR* dir = opendir(path.c_str());
 	if (!dir) return false;
 	bool complete = true;
 	while (struct dirent* entry = readdir(dir)) {
-		if (++visited > 100000 || !currentJob(revision)) { complete = false; break; }
+		if (++visited > 100000 || (all && roms.size() >= 10000) || !currentJob(revision)) { complete = false; break; }
 		if (entry->d_name[0] == '.') continue;
 		std::string child = path + (path.back() == '/' ? "" : "/") + entry->d_name;
 		if (child.size() >= 4096) { complete = false; continue; }
 		struct stat info;
 		if (lstat(child.c_str(), &info)) { complete = false; continue; }
-		if (S_ISDIR(info.st_mode)) { if (!scanRoms(child, depth + 1, revision, visited, roms)) complete = false; }
+		if (S_ISDIR(info.st_mode)) { if (!scanRoms(child, depth + 1, revision, visited, roms, all)) complete = false; }
 		else if (S_ISREG(info.st_mode)) {
 			size_t dot = child.find_last_of('.');
 			if (dot == std::string::npos) continue;
@@ -301,7 +304,7 @@ bool scanRoms(const std::string& path, unsigned depth, unsigned revision, unsign
 			if (ext != ".gba" && ext != ".gb" && ext != ".gbc" && ext != ".zip" && ext != ".7z" &&
 			    ext != ".agb" && ext != ".bin" && ext != ".rom" && ext != ".mb" && ext != ".dmg" && ext != ".sgb" && ext != ".gbx") continue;
 			char image[4096];
-			if (!SwitchArtworkPath(child.c_str(), false, image, sizeof(image)) || !SwitchArtworkPath(child.c_str(), true, image, sizeof(image))) roms.push_back(child);
+			if (all || !SwitchArtworkPath(child.c_str(), false, image, sizeof(image)) || !SwitchArtworkPath(child.c_str(), true, image, sizeof(image))) roms.push_back(child);
 		}
 	}
 	closedir(dir);
@@ -325,13 +328,160 @@ void chooseBestLocked(bool best) {
 	++generation;
 	condvarWakeAll(&changed);
 }
+bool importLocalImage(const std::string& rom, const std::string& path, bool banner, unsigned revision) {
+	std::string bytes;
+	FILE* input = fopen(path.c_str(), "rb");
+	bool ok = false;
+	if (input) {
+		struct stat info;
+		if (!fstat(fileno(input), &info) && S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= 8 * 1024 * 1024) {
+			bytes.resize(info.st_size);
+			ok = fread(&bytes[0], 1, bytes.size(), input) == bytes.size();
+		}
+		fclose(input);
+	}
+	std::string target = selectionPath(rom, banner), temp = target + ".tmp";
+	if (ok && validImage(bytes)) {
+		FILE* output = fopen(temp.c_str(), "wb");
+		ok = output && fwrite(bytes.data(), 1, bytes.size(), output) == bytes.size();
+		if (output && fclose(output)) ok = false;
+		struct mImage* image = ok ? mImageLoad(temp.c_str()) : nullptr;
+		ok = image != nullptr;
+		if (image) mImageDestroy(image);
+	} else if (ok && bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xFF &&
+	           static_cast<unsigned char>(bytes[1]) == 0xD8 && static_cast<unsigned char>(bytes[2]) == 0xFF)
+		ok = SwitchArtworkConvertJPEG(bytes.data(), bytes.size(), temp.c_str());
+	else ok = false;
+	mutexLock(&lock);
+	ok = ok && revision == generation && running && replaceSelection(temp, target);
+	mutexUnlock(&lock);
+	remove(temp.c_str());
+	return ok;
+}
+
+struct LocalImage { std::string path, exact, relaxed; bool banner; };
+std::string localName(std::string name, bool relaxed) {
+	for (char& c : name) if (c == '(' || c == ')' || c == '[' || c == ']') c = ' ';
+	if (relaxed) name = cleanTitle(name);
+	return normalized(name);
+}
+bool regionTag(std::string tag) {
+	std::transform(tag.begin(), tag.end(), tag.begin(), [](unsigned char c) { return std::tolower(c); });
+	static const char* tags[] = { "usa", "europe", "japan", "world", "australia", "canada", "korea", "china", "taiwan", "france", "germany", "spain", "italy", "en", "fr", "de", "es", "it", "ja", "jp", "ko", "zh", "pt", "nl", "sv", "da", "no", "fi", "rev", "revision", "version", "v" };
+	std::string word;
+	bool found = false;
+	for (size_t i = 0; i <= tag.size(); ++i) {
+		unsigned char c = i < tag.size() ? tag[i] : 0;
+		if (std::isalpha(c)) { word += c; continue; }
+		if (!word.empty()) { bool known = false; for (const char* value : tags) if (word == value) known = true; if (!known) return false; found = true; word.clear(); }
+	}
+	return found || tag == "!";
+}
+std::string localTitle(const std::string& name, bool relaxed) {
+	std::string title = name;
+	if (relaxed) for (size_t i = 0; i < title.size();) {
+		if (title[i] != '(' && title[i] != '[') { ++i; continue; }
+		size_t end = title.find(title[i] == '(' ? ')' : ']', i + 1);
+		if (end == std::string::npos) break;
+		if (regionTag(title.substr(i + 1, end - i - 1))) title.erase(i, end - i + 1);
+		else i = end + 1;
+	}
+	return localName(title, relaxed);
+}
+bool imageType(std::string& stem, bool inherited) {
+	std::string lower = stem;
+	std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+	static const char* markers[] = { "banner", "hero", "background", "cover", "boxart", "front", "grid" };
+	for (unsigned i = 0; i < 7; ++i) {
+		std::string marker = markers[i];
+		if (lower.size() <= marker.size()) continue;
+		size_t start = lower.size() - marker.size();
+		if (lower.compare(start, marker.size(), marker) || (lower[start - 1] != '.' && lower[start - 1] != '_' && lower[start - 1] != '-' && lower[start - 1] != ' ')) continue;
+		stem.resize(start - 1);
+		while (!stem.empty() && (stem.back() == '.' || stem.back() == '_' || stem.back() == '-' || stem.back() == ' ')) stem.pop_back();
+		return i < 3;
+	}
+	return inherited;
+}
+bool scanLocalImages(const std::string& path, unsigned depth, bool banner, unsigned revision, unsigned& visited, std::vector<LocalImage>& images) {
+	if (depth > 8 || visited >= 50000 || images.size() >= 10000 || !currentJob(revision)) return false;
+	DIR* dir = opendir(path.c_str()); if (!dir) return false;
+	bool complete = true;
+	while (dirent* entry = readdir(dir)) {
+		if (++visited > 50000 || images.size() >= 10000 || !currentJob(revision)) { complete = false; break; }
+		if (entry->d_name[0] == '.') continue;
+		std::string name = entry->d_name, child = path + "/" + name, lower = name;
+		if (child.size() >= 4096) { complete = false; continue; }
+		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
+		struct stat info; if (lstat(child.c_str(), &info)) { complete = false; continue; }
+		if (S_ISDIR(info.st_mode)) {
+			bool type = banner;
+			if (lower == "banners" || lower == "banner" || lower == "heroes" || lower == "backgrounds") type = true;
+			else if (lower == "covers" || lower == "cover" || lower == "grids" || lower == "boxart") type = false;
+			if (!scanLocalImages(child, depth + 1, type, revision, visited, images)) complete = false;
+		} else if (S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= 8 * 1024 * 1024) {
+			size_t dot = lower.find_last_of('.'); if (dot == std::string::npos) continue;
+			std::string ext = lower.substr(dot); if (ext != ".png" && ext != ".jpg" && ext != ".jpeg") continue;
+			if (!lower.compare(0, 7, "choice-") || lower.find(".selected.") != std::string::npos || lower.find(".bak.") != std::string::npos || lower.find(".tmp.") != std::string::npos) continue;
+			/* Cache filenames are generated from ROM paths, not local title sources. */
+			if (lower.size() > 16 && lower[16] == '.' && lower.substr(0, 16).find_first_not_of("0123456789abcdef") == std::string::npos) continue;
+			std::string stem = name.substr(0, dot); bool type = imageType(stem, banner);
+			std::string exact = localTitle(stem, false), relaxed = localTitle(stem, true);
+			if (!exact.empty()) images.push_back({child, exact, relaxed, type});
+		}
+	}
+	closedir(dir); return complete;
+}
+const LocalImage* localMatch(const std::vector<LocalImage>& images, const std::string& rom, bool banner, bool& ambiguous) {
+	std::string exact = localTitle(base(rom), false), relaxed = localTitle(base(rom), true);
+	const LocalImage* best = nullptr; unsigned score = 0; ambiguous = false;
+	for (const auto& image : images) {
+		if (image.banner != banner) continue;
+		unsigned candidate = image.exact == exact ? 2 : !relaxed.empty() && image.relaxed == relaxed ? 1 : 0;
+		if (!candidate) continue;
+		if (candidate > score) { score = candidate; best = &image; ambiguous = false; }
+		else if (candidate == score) ambiguous = true;
+	}
+	return ambiguous ? nullptr : best;
+}
+void applyLocal(const std::vector<std::string>& roots, const std::string& game, bool missingOnly, unsigned revision) {
+	std::vector<LocalImage> images; unsigned visited = 0;
+	bool complete = scanLocalImages(directory, 0, false, revision, visited, images);
+	std::vector<std::string> roms;
+	if (!game.empty()) roms.push_back(game);
+	else { visited = 0; for (const auto& root : roots) if (!scanRoms(root, 0, revision, visited, roms, true)) complete = false; }
+	std::sort(roms.begin(), roms.end()); roms.erase(std::unique(roms.begin(), roms.end()), roms.end());
+	mutexLock(&lock); if (revision == generation) { bulkTotal = roms.size(); bulkPartial = !complete; status = "Matching local covers and banners..."; } mutexUnlock(&lock);
+	unsigned assigned = 0, unmatched = 0, failed = 0;
+	for (size_t i = 0; i < roms.size() && currentJob(revision); ++i) {
+		for (unsigned type = 0; type < 2 && currentJob(revision); ++type) {
+			char existing[4096]; if (missingOnly && SwitchArtworkPath(roms[i].c_str(), type != 0, existing, sizeof(existing))) continue;
+			bool ambiguous = false; const LocalImage* image = localMatch(images, roms[i], type != 0, ambiguous);
+			if (!image) { ++unmatched; continue; }
+			if (importLocalImage(roms[i], image->path, type != 0, revision)) {
+				++assigned; mutexLock(&lock); if (revision == generation) ++imageRevision; mutexUnlock(&lock);
+			} else ++failed;
+		}
+		mutexLock(&lock); if (revision == generation) { bulkDone = i + 1; percent = 100 * bulkDone / bulkTotal; } mutexUnlock(&lock);
+	}
+	mutexLock(&lock);
+	if (revision == generation) {
+		char summary[192]; snprintf(summary, sizeof(summary), "%u images assigned; %u unmatched/ambiguous; %u failed.%s", assigned, unmatched, failed, complete ? "" : " Some folders were skipped.");
+		status = summary; bulk = bulkScan = localActive = false; applying = false; finished = true;
+	}
+	mutexUnlock(&lock);
+}
 void work(void*) {
 	while (true) {
 		mutexLock(&lock);
-		while (running && !resetPending && !importPending && discarded.empty() && (suspended || (key.empty() && !SwitchPlazaHasKey()) || (!bulk && !testKey && !searchPending && !choosePending && (pending.empty() || (!pendingAttempt && !covers && !banners))))) condvarWait(&changed, &lock);
+		while (running && !resetPending && !importPending && !localPending && discarded.empty() && (suspended || (key.empty() && !SwitchPlazaHasKey()) || (!bulk && !testKey && !searchPending && !choosePending && (pending.empty() || (!pendingAttempt && !covers && !banners))))) condvarWait(&changed, &lock);
 		std::vector<std::string> cleanup; cleanup.swap(discarded);
 		bool alive = running;
 		bool reset = resetPending, restoreBanner = resetBanner;
+		bool local = localPending, missingOnly = localMissingOnly;
+		std::vector<std::string> roots = localRoots;
+		std::string game = localGame;
+		localPending = false;
 		bool importing = importPending, localBanner = importBanner;
 		std::string localRom = importRom, localPath = importPath;
 		importPending = false;
@@ -344,8 +494,8 @@ void work(void*) {
 		bool cover = covers, banner = banners, test = testKey;
 		bool attempt = pendingAttempt;
 		bool exact = pendingExact; pendingExact = false;
-		bool scan = bulk && bulkScan;
-		bool bulkItem = bulk && !scan && bulkDone < bulkRoms.size();
+		bool scan = bulk && bulkScan && !local;
+		bool bulkItem = bulk && !localActive && !scan && bulkDone < bulkRoms.size();
 		std::string scanDirectory = bulkDirectory;
 		if (bulkItem) { rom = bulkRoms[bulkDone]; cover = banner = true; }
 		pendingAttempt = false;
@@ -368,6 +518,7 @@ void work(void*) {
 		if (!alive) break;
 		Job job{revision, bulkItem};
 		plazaError.clear();
+		if (local) { applyLocal(roots, game, missingOnly, revision); continue; }
 		if (scan) {
 			std::vector<std::string> roms;
 			unsigned visited = 0;
@@ -398,32 +549,7 @@ void work(void*) {
 			continue;
 		}
 		if (importing) {
-			std::string bytes;
-			FILE* input = fopen(localPath.c_str(), "rb");
-			bool ok = false;
-			if (input) {
-				struct stat info;
-				if (!fstat(fileno(input), &info) && S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= 8 * 1024 * 1024) {
-					bytes.resize(info.st_size);
-					ok = fread(&bytes[0], 1, bytes.size(), input) == bytes.size();
-				}
-				fclose(input);
-			}
-			std::string target = selectionPath(localRom, localBanner), temp = target + ".tmp";
-			if (ok && validImage(bytes)) {
-				FILE* output = fopen(temp.c_str(), "wb");
-				ok = output && fwrite(bytes.data(), 1, bytes.size(), output) == bytes.size();
-				if (output && fclose(output)) ok = false;
-				struct mImage* image = ok ? mImageLoad(temp.c_str()) : nullptr;
-				ok = image != nullptr;
-				if (image) mImageDestroy(image);
-			} else if (ok && bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xFF &&
-			           static_cast<unsigned char>(bytes[1]) == 0xD8 && static_cast<unsigned char>(bytes[2]) == 0xFF)
-				ok = SwitchArtworkConvertJPEG(bytes.data(), bytes.size(), temp.c_str());
-			else ok = false;
-			mutexLock(&lock); bool current = revision == generation && running; mutexUnlock(&lock);
-			ok = ok && current && replaceSelection(temp, target);
-			remove(temp.c_str());
+			bool ok = importLocalImage(localRom, localPath, localBanner, revision);
 			mutexLock(&lock);
 			if (revision == generation) { if (ok) ++imageRevision; finished = true; status = ok ? "Artwork imported" : "Import failed: choose a valid PNG, JPG or JPEG (up to 8 MiB)"; }
 			mutexUnlock(&lock);
@@ -616,7 +742,7 @@ void SwitchArtworkGetState(SwitchArtworkState* state) {
 	state->resetId = resetSerial;
 	state->resetDone = resetCompleted;
 	state->resetSucceeded = resetSucceeded;
-	state->bulk = bulk; state->bulkDone = bulkDone; state->bulkTotal = bulkTotal;
+	state->local = localActive; state->bulk = bulk; state->bulkDone = bulkDone; state->bulkTotal = bulkTotal;
 	state->busy = busy; state->needsChoice = needsChoice; state->searching = searching; state->finished = finished; state->percent = percent; state->revision = imageRevision; state->count = options.size(); snprintf(state->rom, sizeof(state->rom), "%s", choiceRom.empty() ? requested.c_str() : choiceRom.c_str()); snprintf(state->message, sizeof(state->message), "%s", status.c_str()); mutexUnlock(&lock);
 }
 bool SwitchArtworkGetOption(size_t index, SwitchArtworkOption* option) {
@@ -655,6 +781,38 @@ void SwitchArtworkSetSource(SwitchArtworkSource source) {
 SwitchArtworkSource SwitchArtworkGetSource(void) {
 	if (!initialized) return SWITCH_ARTWORK_AUTO;
 	mutexLock(&lock); SwitchArtworkSource result = choiceSource; mutexUnlock(&lock); return result;
+}
+bool SwitchArtworkApplyLocal(const char* const* roots, size_t count, bool missingOnly) {
+	if (!initialized || !roots || !count || count > 16) return false;
+	std::vector<std::string> paths;
+	for (size_t i = 0; i < count; ++i) {
+		if (!roots[i] || !*roots[i] || strlen(roots[i]) >= 4096) return false;
+		std::string path = roots[i];
+		paths.push_back(path);
+	}
+	mutexLock(&lock);
+	if (applying || importPending || choosePending || resetPending || localActive) { mutexUnlock(&lock); return false; }
+	cancelBulkLocked(); ++generation; localRoots = std::move(paths); localGame.clear(); localMissingOnly = missingOnly;
+	localPending = localActive = bulk = applying = true; bulkDone = bulkTotal = 0;
+	suspended = finished = needsChoice = searching = searchPending = choosePending = testKey = false;
+	pending.clear(); discardOptions(); percent = 0; status = "Scanning shared artwork and ROM folders...";
+	condvarWakeAll(&changed); mutexUnlock(&lock); return true;
+}
+bool SwitchArtworkApplyLocalGame(const char* rom, bool missingOnly) {
+	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
+	mutexLock(&lock);
+	if (applying || importPending || choosePending || resetPending || localActive) { mutexUnlock(&lock); return false; }
+	cancelBulkLocked(); ++generation; localRoots.clear(); localGame = rom; localMissingOnly = missingOnly;
+	localPending = localActive = bulk = applying = true; bulkDone = bulkTotal = 0;
+	suspended = finished = needsChoice = searching = searchPending = choosePending = testKey = false;
+	pending.clear(); discardOptions(); percent = 0; status = "Matching local artwork for this game...";
+	condvarWakeAll(&changed); mutexUnlock(&lock); return true;
+}
+void SwitchArtworkCancelLocal(void) {
+	if (!initialized) return;
+	mutexLock(&lock);
+	if (localActive) { cancelBulkLocked(); ++generation; applying = false; finished = true; status = "Local artwork assignment cancelled"; condvarWakeAll(&changed); }
+	mutexUnlock(&lock);
 }
 bool SwitchArtworkImport(const char* rom, const char* path, bool banner) {
 	if (!initialized || !rom || !*rom || strlen(rom) >= 4096 || !path || !*path || strlen(path) >= 4096) return false;

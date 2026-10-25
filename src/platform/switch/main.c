@@ -1076,7 +1076,7 @@ int main(int argc, char* argv[]) {
 				.nStates = 2
 			},
 			{
-				.title = "Artwork (SteamGridDB)",
+				.title = "Artwork",
 				.submenu = SwitchUIArtworkMenu(),
 			},
 			{
