@@ -230,6 +230,7 @@ static int _texture(const char* path, bool banner, bool preview) {
 
 static bool _image(const char* rom, bool banner, int x, int y, int w, int h) {
 	int i = _texture(rom, banner, false);
+	if (i < 0 && banner) i = _texture(rom, false, false);
 	if (i < 0) {
 		return false;
 	}
@@ -1856,7 +1857,7 @@ void SwitchUIInit(struct mGUIRunner* runner) {
 	    "texcoord)*tint;float "
 	    "dim=0.44+0.39*(1.0-smoothstep(225.0,290.0,point.y))+0.43*smoothstep(500.0,590.0,point.y);pixel.rgb=mix(pixel."
 	    "rgb,"
-	    "vec3(0.09,0.078,0.122),shade*min(dim,0.93));pixel.a*=a;}";
+	    "vec3(0.09,0.078,0.122),shade*0.85*min(dim,0.93));pixel.a*=a;}";
 	GLuint vs = _shader(GL_VERTEX_SHADER, vertex), fs = _shader(GL_FRAGMENT_SHADER, fragment);
 	_program = glCreateProgram();
 	glAttachShader(_program, vs);
