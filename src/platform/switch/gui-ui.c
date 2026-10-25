@@ -1093,6 +1093,13 @@ static void _pickerDraw(struct GUIParams* params) {
 	_resetNoticeDraw(params);
 }
 
+static void _artworkDimensions(struct GUIParams* params) {
+	SwitchUIFontSize(params->font, 14);
+	SwitchUIPrint(params->font, 408, 650, 784, UI_MUTED,
+	              "Recommended: cover 600 x 900 px (2:3); banner 1280 x 720 px (16:9).");
+	SwitchUIFontSize(params->font, 18);
+}
+
 static bool _artworkPages(struct GUIParams* params, struct GUIMenu* menu, struct GUIMenuState* state,
                           enum GUIMenuExitReason* result) {
 	bool local = menu == &_localArtworkMenu;
@@ -1170,6 +1177,7 @@ static bool _artworkPages(struct GUIParams* params, struct GUIMenu* menu, struct
 			if (percent) SwitchUIRoundRect(408, 590, 784 * percent / 100, 4, 2, UI_FOCUS);
 		}
 	}
+	_artworkDimensions(params);
 	SwitchUIDrawRect(48, 658, 1184, 1, 0xFF38332D);
 	SwitchUIHint(params->font, 48, 696, "B", "Back");
 	SwitchUIHint(params->font, 1040, 696, "A", "Select");
@@ -1326,6 +1334,7 @@ static bool _artwork(struct GUIParams* params, struct GUIMenu* menu, enum GUIMen
 	else if (progress.bulk) snprintf(scope, sizeof(scope), "%u / %u games processed — downloads continue while browsing", progress.bulkDone, progress.bulkTotal);
 	else snprintf(scope, sizeof(scope), "Scans the current library folder and subfolders. Existing images are kept.");
 	SwitchUIPrint(params->font, 408, 630, 784, UI_MUTED, scope);
+	_artworkDimensions(params);
 	SwitchUIDrawRect(48, 658, 1184, 1, 0xFF38332D);
 	SwitchUIHint(params->font, 48, 696, "B", "Back");
 	SwitchUIHint(params->font, 1040, 696, "A", "Select");
