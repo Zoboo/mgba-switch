@@ -83,7 +83,8 @@ bool SwitchArtworkConvertJPEG(const void* data, size_t size, const char* output)
 	if (!jpeg_start_decompress(&state->decoder) || state->decoder.output_components != 3) {
 		_jpegError((j_common_ptr) &state->decoder);
 	}
-	state->image = mImageCreate(state->decoder.output_width, state->decoder.output_height, mCOLOR_RGB8);
+	/* libjpeg writes RGB bytes; this is the BGR8 integer layout on Switch. */
+	state->image = mImageCreate(state->decoder.output_width, state->decoder.output_height, mCOLOR_BGR8);
 	if (!state->image) {
 		_jpegError((j_common_ptr) &state->decoder);
 	}

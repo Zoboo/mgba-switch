@@ -47,6 +47,11 @@ static bool _readLine(FILE* file, char* value, size_t size) {
 	return false;
 }
 
+void SwitchGameSettingsDefaults(struct SwitchGameSettings* settings) {
+	memset(settings, 0, sizeof(*settings));
+	strlcpy(settings->extension, ".sav", sizeof(settings->extension));
+}
+
 bool SwitchGameSettingsLoad(const char* rom, struct SwitchGameSettings* settings) {
 	memset(settings, 0, sizeof(*settings));
 	char path[PATH_MAX];

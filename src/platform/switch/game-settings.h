@@ -13,6 +13,7 @@ struct SwitchGameSettings {
 };
 
 bool SwitchGameSettingsLoad(const char* rom, struct SwitchGameSettings* settings);
+void SwitchGameSettingsDefaults(struct SwitchGameSettings* settings);
 bool SwitchGameSettingsSave(const char* rom, const struct SwitchGameSettings* settings);
 void SwitchGameSettingsSetRom(const char* rom);
 void SwitchGameSettingsApply(struct mGUIRunner* runner);

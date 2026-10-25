@@ -86,6 +86,8 @@ enum GameSettingsPage { GAME_SETTINGS_MAIN, GAME_SETTINGS_ARTWORK, GAME_SETTINGS
 static enum GameSettingsPage _gameSettingsPage;
 static bool _gameSettingsLocalError;
 static bool _gameSettingsLocalNotice;
+static unsigned _gameSettingsResetWatch;
+static char _gameSettingsResetRom[PATH_MAX], _gameSettingsResetMessage[192];
 static char _gameSettingsRom[PATH_MAX];
 static struct SwitchGameSettings _gameSettings;
 
@@ -608,6 +610,40 @@ static void _pickerOpen(struct GUIParams* params, const char* rom, bool banner) 
 
 static void _importArtwork(struct GUIParams* params, const char* rom);
 
+static void _gameSaveFolder(struct GUIParams* params) {
+	struct GUIMenu menu = { .title = "Save Folder" };
+	GUIMenuItemListInit(&menu.items, 3);
+	*GUIMenuItemListAppend(&menu.items) = (struct GUIMenuItem) { .title = "Browse SD Card" };
+	*GUIMenuItemListAppend(&menu.items) = (struct GUIMenuItem) { .title = "Use Default Save Folder" };
+	*GUIMenuItemListAppend(&menu.items) = (struct GUIMenuItem) { .title = "Cancel" };
+	struct GUIMenuItem* selected = NULL;
+	bool accepted = GUIShowMenu(params, &menu, &selected) == GUI_MENU_EXIT_ACCEPT && selected && menu.index < 2;
+	unsigned index = menu.index;
+	GUIMenuItemListDeinit(&menu.items);
+	if (!accepted) return;
+	struct SwitchGameSettings next = _gameSettings;
+	if (index) next.directory[0] = 0;
+	else {
+		char initial[PATH_MAX];
+		const char* global = mCoreConfigGetValue(&_runner->config, "savegamePath");
+		if (*next.directory) strlcpy(initial, next.directory, sizeof(initial));
+		else if (global && *global) strlcpy(initial, global, sizeof(initial));
+		else {
+			strlcpy(initial, _gameSettingsRom, sizeof(initial));
+			char* slash = strrchr(initial, '/');
+			if (slash) slash[slash == initial || slash == initial + 5 ? 1 : 0] = 0;
+			else strlcpy(initial, params->currentPath, sizeof(initial));
+		}
+		if (!SwitchUISelectDirectory(params, initial, next.directory, sizeof(next.directory))) return;
+		if (access(next.directory, W_OK)) {
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "This save folder is not writable. Choose another folder.");
+			return;
+		}
+	}
+	if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
+	else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save this game's save folder. Existing save files are unchanged.");
+}
+
 static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool tapped, unsigned x, unsigned y) {
 	if (!_gameSettingsOpen || _pickerPhase) return false;
 	if (input & ((1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) {
@@ -627,6 +663,8 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 		activate = true;
 	}
 	if (activate) {
+		if (_gameSettingsResetWatch) return true;
+		if (_gameSettingsPage != GAME_SETTINGS_MAIN || _gameSettingsIndex != 3) _gameSettingsResetMessage[0] = 0;
 		if (_gameSettingsPage == GAME_SETTINGS_ARTWORK) {
 			if (!_gameSettingsIndex) {
 				_gameSettingsLocalNotice = true;
@@ -648,20 +686,7 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 			_gameSettingsPage = GAME_SETTINGS_ARTWORK;
 			_gameSettingsIndex = 0;
 		} else if (_gameSettingsIndex == 1) {
-			SwkbdConfig keyboard;
-			if (R_SUCCEEDED(swkbdCreate(&keyboard, 0))) {
-				swkbdConfigMakePresetDefault(&keyboard);
-				swkbdConfigSetHeaderText(&keyboard, "Save folder (existing sdmc:/ folder; blank for default)");
-				swkbdConfigSetInitialText(&keyboard, _gameSettings.directory);
-				swkbdConfigSetStringLenMax(&keyboard, PATH_MAX - 1);
-				struct SwitchGameSettings next = _gameSettings;
-				bool accepted = R_SUCCEEDED(swkbdShow(&keyboard, next.directory, sizeof(next.directory)));
-				swkbdClose(&keyboard);
-				if (accepted) {
-					if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
-					else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save settings. Choose an existing writable sdmc:/ folder.");
-				}
-			}
+			_gameSaveFolder(params);
 		} else if (_gameSettingsIndex == 2) {
 			const char* extensions[] = { "", ".sav", ".srm", ".dat" };
 			unsigned index = 0;
@@ -671,9 +696,25 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
 			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
 		} else if (_gameSettingsIndex == 3) {
-			struct SwitchGameSettings next = { 0 };
-			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
-			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
+			if (GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
+			    "Restore Default Settings for %s? Saves will use .sav and the default save folder. Cover and banner will be empty. Existing save files and source images stay untouched.",
+			    strrchr(_gameSettingsRom, '/') ? strrchr(_gameSettingsRom, '/') + 1 : _gameSettingsRom) == GUI_MENU_EXIT_ACCEPT) {
+				struct SwitchGameSettings next;
+				SwitchGameSettingsDefaults(&next);
+				_gameSettingsLocalNotice = false;
+				strlcpy(_gameSettingsResetRom, _gameSettingsRom, sizeof(_gameSettingsResetRom));
+				if (!SwitchGameSettingsSave(_gameSettingsRom, &next)) {
+					strlcpy(_gameSettingsResetMessage, "Could not restore save defaults. Previous settings are unchanged.", sizeof(_gameSettingsResetMessage));
+				} else {
+					_gameSettings = next;
+					if (SwitchArtworkClearGame(_gameSettingsRom)) {
+						struct SwitchArtworkState reset;
+						SwitchArtworkGetState(&reset);
+						_gameSettingsResetWatch = reset.resetId;
+						strlcpy(_gameSettingsResetMessage, "Restoring default artwork...", sizeof(_gameSettingsResetMessage));
+					} else strlcpy(_gameSettingsResetMessage, "Save defaults restored, but the artwork reset could not start. Please retry.", sizeof(_gameSettingsResetMessage));
+				}
+			}
 		}
 		GUIInvalidateKeys(params);
 	}
@@ -681,6 +722,16 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 }
 
 static void _gameSettingsDraw(struct GUIParams* params) {
+	if (_gameSettingsResetWatch) {
+		struct SwitchArtworkState reset;
+		SwitchArtworkGetState(&reset);
+		if (reset.resetDone >= _gameSettingsResetWatch) {
+			bool succeeded = reset.resetDone == _gameSettingsResetWatch && reset.resetSucceeded;
+			_gameSettingsResetWatch = 0;
+			strlcpy(_gameSettingsResetMessage, succeeded ? "Default settings restored: .sav, default save folder, and empty artwork." :
+			    "Save defaults restored, but artwork could not be cleared. Check SD access and retry.", sizeof(_gameSettingsResetMessage));
+		}
+	}
 	if (!_gameSettingsOpen) return;
 	SwitchUIDrawRect(0, 0, 1280, 720, 0xD9000000);
 	SwitchUIRoundRect(184, 100, 912, 528, 16, UI_BASE);
@@ -692,7 +743,7 @@ static void _gameSettingsDraw(struct GUIParams* params) {
 	const char* name = strrchr(_gameSettingsRom, '/');
 	SwitchUIFontSize(params->font, 20);
 	SwitchUIPrint(params->font, 216, 184, 848, UI_FOCUS, name ? name + 1 : _gameSettingsRom);
-	static const char* mainLabels[] = { "Change Artwork", "Save folder", "Save file extension (raw saves only)", "Restore default save settings" };
+	static const char* mainLabels[] = { "Change Artwork", "Save folder", "Save file extension (raw saves only)", "Restore Default Settings" };
 	static const char* artworkLabels[] = { "Automatically Assign", "Manually Assign" };
 	static const char* manualLabels[] = { "Change Cover", "Change Banner" };
 	static const char* sourceLabels[] = { "Browse Online", "Browse SD Card" };
@@ -709,7 +760,10 @@ static void _gameSettingsDraw(struct GUIParams* params) {
 		    i == 2 ? (_gameSettings.extension[0] ? _gameSettings.extension : "Default (.sav or configured player slot)") : NULL;
 		if (value) { SwitchUIFontSize(params->font, 16); SwitchUIPrint(params->font, 232, top + 48, 808, UI_MUTED, value); }
 	}
-	if (_gameSettingsLocalNotice) {
+	if (*_gameSettingsResetMessage && !strcmp(_gameSettingsResetRom, _gameSettingsRom)) {
+		SwitchUIFontSize(params->font, 16);
+		SwitchUIPrint(params->font, 216, 542, 848, UI_FOCUS, _gameSettingsResetMessage);
+	} else if (_gameSettingsLocalNotice) {
 		struct SwitchArtworkState local;
 		SwitchArtworkGetState(&local);
 		SwitchUIFontSize(params->font, 16);
@@ -956,9 +1010,9 @@ static void _resetDraw(struct GUIParams* params) {
 static void _pickerDraw(struct GUIParams* params) {
 	struct SwitchArtworkState status;
 	SwitchArtworkGetState(&status);
-	if (_resetWatch && status.resetDone == _resetWatch) {
+	if (_resetWatch && status.resetDone >= _resetWatch) {
+		_resetSuccess = status.resetDone == _resetWatch && status.resetSucceeded;
 		_resetWatch = 0;
-		_resetSuccess = status.resetSucceeded;
 		strlcpy(_resetMessage, _resetSuccess ? "Original artwork or fallback restored." :
 		        "Could not remove the replacement. Check SD card access and try again.", sizeof(_resetMessage));
 		snprintf(_resetNotice, sizeof(_resetNotice), "%s reset %s: %s", _resetBanner ? "Banner" : "Cover",

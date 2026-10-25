@@ -22,6 +22,7 @@ bool SwitchArtworkApplyLocalGame(const char* romPath, bool missingOnly);
 void SwitchArtworkCancelLocal(void);
 bool SwitchArtworkImport(const char* romPath, const char* imagePath, bool banner);
 bool SwitchArtworkReset(const char* romPath, bool banner);
+bool SwitchArtworkClearGame(const char* romPath);
 void SwitchArtworkChoose(size_t index);
 void SwitchArtworkCancelChoice(void);
 void SwitchArtworkInit(const char* directory);
