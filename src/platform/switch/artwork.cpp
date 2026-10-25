@@ -43,13 +43,15 @@ SwitchArtworkSource choiceSource = SWITCH_ARTWORK_AUTO;
 std::vector<Option> options;
 bool needsChoice, searching, finished, searchPending, choosePending;
 bool searchBest;
-bool resetPending, resetBanner, resetClearGame;
-bool importPending, importBanner, applying;
+bool resetPending, resetClearGame;
+SwitchArtworkType resetType;
+bool importPending, applying;
+SwitchArtworkType importType;
 std::string importRom, importPath;
 bool resetSucceeded;
 unsigned resetSerial, resetCompleted;
 std::string resetRom;
-bool choiceCovers, choiceBanners;
+bool choiceCovers, choiceBanners, choiceBox;
 unsigned percent, imageRevision;
 bool unavailable;
 std::vector<std::string> discarded;
@@ -128,30 +130,30 @@ std::vector<const rapidjson::Value*> rankedArt(const rapidjson::Document& docume
 	});
 	return result;
 }
-std::string cachePath(const std::string& rom, bool banner) {
+std::string cachePath(const std::string& rom, unsigned type) {
 	uint64_t hash = UINT64_C(14695981039346656037);
 	for (unsigned char c : rom) { hash ^= c; hash *= UINT64_C(1099511628211); }
 	char name[64];
-	snprintf(name, sizeof(name), "/%016llx.%s.png", (unsigned long long) hash, banner ? "banner" : "cover");
+	snprintf(name, sizeof(name), "/%016llx.%s.png", (unsigned long long) hash, type == SWITCH_ARTWORK_BOX ? "boxart" : type == SWITCH_ARTWORK_BANNER ? "banner" : "cover");
 	return directory + name;
 }
 bool exists(const std::string& path) {
 	struct stat info;
 	return !stat(path.c_str(), &info) && S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= 8 * 1024 * 1024;
 }
-std::string selectionPath(const std::string& rom, bool banner) {
-	return cachePath(rom, banner) + ".selected.png";
+std::string selectionPath(const std::string& rom, unsigned type) {
+	return cachePath(rom, type) + ".selected.png";
 }
-std::string emptyPath(const std::string& rom, bool banner) {
-	return cachePath(rom, banner) + ".empty";
+std::string emptyPath(const std::string& rom, unsigned type) {
+	return cachePath(rom, type) + ".empty";
 }
-bool revealArtwork(const std::string& rom, bool banner) {
-	return !remove(emptyPath(rom, banner).c_str()) || errno == ENOENT;
+bool revealArtwork(const std::string& rom, unsigned type) {
+	return !remove(emptyPath(rom, type).c_str()) || errno == ENOENT;
 }
 bool clearGameArtwork(const std::string& rom) {
 	bool ok = true;
-	for (unsigned type = 0; type < 2; ++type) {
-		std::string path = emptyPath(rom, type != 0), temp = path + ".tmp";
+	for (unsigned type = 0; type < 3; ++type) {
+		std::string path = emptyPath(rom, type), temp = path + ".tmp";
 		if (exists(path)) continue;
 		FILE* file = fopen(temp.c_str(), "wb");
 		bool written = file && fwrite("1\n", 1, 2, file) == 2;
@@ -338,7 +340,7 @@ bool scanRoms(const std::string& path, unsigned depth, unsigned revision, unsign
 void alternatives(const std::string& rom, const std::string& title, bool cover, bool banner, unsigned revision) {
 	mutexLock(&lock);
 	if (revision == generation) {
-		choiceRom = rom; choiceCovers = cover; choiceBanners = banner;
+		choiceRom = rom; choiceCovers = cover; choiceBanners = banner; choiceBox = false;
 		choiceSource = SWITCH_ARTWORK_AUTO; searchBest = false;
 		searchTitle = title; searchPending = searching = needsChoice = true;
 		finished = false; status = "Searching closest artwork matches...";
@@ -353,7 +355,7 @@ void chooseBestLocked(bool best) {
 	++generation;
 	condvarWakeAll(&changed);
 }
-bool importLocalImage(const std::string& rom, const std::string& path, bool banner, unsigned revision) {
+bool importLocalImage(const std::string& rom, const std::string& path, unsigned type, unsigned revision) {
 	std::string bytes;
 	FILE* input = fopen(path.c_str(), "rb");
 	bool ok = false;
@@ -365,7 +367,7 @@ bool importLocalImage(const std::string& rom, const std::string& path, bool bann
 		}
 		fclose(input);
 	}
-	std::string target = selectionPath(rom, banner), temp = target + ".tmp";
+	std::string target = selectionPath(rom, type), temp = target + ".tmp";
 	if (ok && validImage(bytes)) {
 		FILE* output = fopen(temp.c_str(), "wb");
 		ok = output && fwrite(bytes.data(), 1, bytes.size(), output) == bytes.size();
@@ -378,13 +380,13 @@ bool importLocalImage(const std::string& rom, const std::string& path, bool bann
 		ok = SwitchArtworkConvertJPEG(bytes.data(), bytes.size(), temp.c_str());
 	else ok = false;
 	mutexLock(&lock);
-	ok = ok && revision == generation && running && replaceSelection(temp, target) && revealArtwork(rom, banner);
+	ok = ok && revision == generation && running && replaceSelection(temp, target) && revealArtwork(rom, type);
 	mutexUnlock(&lock);
 	remove(temp.c_str());
 	return ok;
 }
 
-struct LocalImage { std::string path, exact, relaxed; bool banner; };
+struct LocalImage { std::string path, exact, relaxed; unsigned type; };
 std::string localName(std::string name, bool relaxed) {
 	for (char& c : name) if (c == '(' || c == ')' || c == '[' || c == ']') c = ' ';
 	if (relaxed) name = cleanTitle(name);
@@ -413,22 +415,22 @@ std::string localTitle(const std::string& name, bool relaxed) {
 	}
 	return localName(title, relaxed);
 }
-bool imageType(std::string& stem, bool inherited) {
+unsigned imageType(std::string& stem, unsigned inherited) {
 	std::string lower = stem;
 	std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
-	static const char* markers[] = { "banner", "hero", "background", "cover", "boxart", "front", "grid" };
-	for (unsigned i = 0; i < 7; ++i) {
+	static const char* markers[] = { "banner", "hero", "background", "cover", "boxart", "front", "grid", "box" };
+	for (unsigned i = 0; i < 8; ++i) {
 		std::string marker = markers[i];
 		if (lower.size() <= marker.size()) continue;
 		size_t start = lower.size() - marker.size();
 		if (lower.compare(start, marker.size(), marker) || (lower[start - 1] != '.' && lower[start - 1] != '_' && lower[start - 1] != '-' && lower[start - 1] != ' ')) continue;
 		stem.resize(start - 1);
 		while (!stem.empty() && (stem.back() == '.' || stem.back() == '_' || stem.back() == '-' || stem.back() == ' ')) stem.pop_back();
-		return i < 3;
+		return i < 3 ? SWITCH_ARTWORK_BANNER : (i == 4 || i == 7) ? SWITCH_ARTWORK_BOX : SWITCH_ARTWORK_COVER;
 	}
 	return inherited;
 }
-bool scanLocalImages(const std::string& path, unsigned depth, bool banner, unsigned revision, unsigned& visited, std::vector<LocalImage>& images) {
+bool scanLocalImages(const std::string& path, unsigned depth, unsigned inherited, unsigned revision, unsigned& visited, std::vector<LocalImage>& images) {
 	if (depth > 8 || visited >= 50000 || images.size() >= 10000 || !currentJob(revision)) return false;
 	DIR* dir = opendir(path.c_str()); if (!dir) return false;
 	bool complete = true;
@@ -440,9 +442,10 @@ bool scanLocalImages(const std::string& path, unsigned depth, bool banner, unsig
 		std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return std::tolower(c); });
 		struct stat info; if (lstat(child.c_str(), &info)) { complete = false; continue; }
 		if (S_ISDIR(info.st_mode)) {
-			bool type = banner;
-			if (lower == "banners" || lower == "banner" || lower == "heroes" || lower == "backgrounds") type = true;
-			else if (lower == "covers" || lower == "cover" || lower == "grids" || lower == "boxart") type = false;
+			unsigned type = inherited;
+			if (lower == "banners" || lower == "banner" || lower == "heroes" || lower == "backgrounds") type = SWITCH_ARTWORK_BANNER;
+			else if (lower == "boxart" || lower == "boxarts" || lower == "boxes" || lower == "box") type = SWITCH_ARTWORK_BOX;
+			else if (lower == "covers" || lower == "cover" || lower == "grids") type = SWITCH_ARTWORK_COVER;
 			if (!scanLocalImages(child, depth + 1, type, revision, visited, images)) complete = false;
 		} else if (S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= 8 * 1024 * 1024) {
 			size_t dot = lower.find_last_of('.'); if (dot == std::string::npos) continue;
@@ -450,18 +453,18 @@ bool scanLocalImages(const std::string& path, unsigned depth, bool banner, unsig
 			if (!lower.compare(0, 7, "choice-") || lower.find(".selected.") != std::string::npos || lower.find(".bak.") != std::string::npos || lower.find(".tmp.") != std::string::npos) continue;
 			/* Cache filenames are generated from ROM paths, not local title sources. */
 			if (lower.size() > 16 && lower[16] == '.' && lower.substr(0, 16).find_first_not_of("0123456789abcdef") == std::string::npos) continue;
-			std::string stem = name.substr(0, dot); bool type = imageType(stem, banner);
+			std::string stem = name.substr(0, dot); unsigned type = imageType(stem, inherited);
 			std::string exact = localTitle(stem, false), relaxed = localTitle(stem, true);
 			if (!exact.empty()) images.push_back({child, exact, relaxed, type});
 		}
 	}
 	closedir(dir); return complete;
 }
-const LocalImage* localMatch(const std::vector<LocalImage>& images, const std::string& rom, bool banner, bool& ambiguous) {
+const LocalImage* localMatch(const std::vector<LocalImage>& images, const std::string& rom, unsigned type, bool& ambiguous) {
 	std::string exact = localTitle(base(rom), false), relaxed = localTitle(base(rom), true);
 	const LocalImage* best = nullptr; unsigned score = 0; ambiguous = false;
 	for (const auto& image : images) {
-		if (image.banner != banner) continue;
+		if (image.type != type) continue;
 		unsigned candidate = image.exact == exact ? 2 : !relaxed.empty() && image.relaxed == relaxed ? 1 : 0;
 		if (!candidate) continue;
 		if (candidate > score) { score = candidate; best = &image; ambiguous = false; }
@@ -476,14 +479,14 @@ void applyLocal(const std::vector<std::string>& roots, const std::string& game, 
 	if (!game.empty()) roms.push_back(game);
 	else { visited = 0; for (const auto& root : roots) if (!scanRoms(root, 0, revision, visited, roms, true)) complete = false; }
 	std::sort(roms.begin(), roms.end()); roms.erase(std::unique(roms.begin(), roms.end()), roms.end());
-	mutexLock(&lock); if (revision == generation) { bulkTotal = roms.size(); bulkPartial = !complete; status = "Matching local covers and banners..."; } mutexUnlock(&lock);
+	mutexLock(&lock); if (revision == generation) { bulkTotal = roms.size(); bulkPartial = !complete; status = "Matching local covers, box art and banners..."; } mutexUnlock(&lock);
 	unsigned assigned = 0, unmatched = 0, failed = 0;
 	for (size_t i = 0; i < roms.size() && currentJob(revision); ++i) {
-		for (unsigned type = 0; type < 2 && currentJob(revision); ++type) {
-			char existing[4096]; if (missingOnly && SwitchArtworkPath(roms[i].c_str(), type != 0, existing, sizeof(existing))) continue;
-			bool ambiguous = false; const LocalImage* image = localMatch(images, roms[i], type != 0, ambiguous);
+		for (unsigned type = 0; type < 3 && currentJob(revision); ++type) {
+			char existing[4096]; if (missingOnly && SwitchArtworkPathType(roms[i].c_str(), static_cast<SwitchArtworkType>(type), existing, sizeof(existing))) continue;
+			bool ambiguous = false; const LocalImage* image = localMatch(images, roms[i], type, ambiguous);
 			if (!image) { ++unmatched; continue; }
-			if (importLocalImage(roms[i], image->path, type != 0, revision)) {
+			if (importLocalImage(roms[i], image->path, type, revision)) {
 				++assigned; mutexLock(&lock); if (revision == generation) ++imageRevision; mutexUnlock(&lock);
 			} else ++failed;
 		}
@@ -502,12 +505,14 @@ void work(void*) {
 		while (running && !resetPending && !importPending && !localPending && discarded.empty() && (suspended || (key.empty() && !SwitchPlazaHasKey()) || (!bulk && !testKey && !searchPending && !choosePending && (pending.empty() || (!pendingAttempt && !covers && !banners))))) condvarWait(&changed, &lock);
 		std::vector<std::string> cleanup; cleanup.swap(discarded);
 		bool alive = running;
-		bool reset = resetPending, restoreBanner = resetBanner, clearGame = resetClearGame;
+		bool reset = resetPending, clearGame = resetClearGame;
+		SwitchArtworkType restoreType = resetType;
 		bool local = localPending, missingOnly = localMissingOnly;
 		std::vector<std::string> roots = localRoots;
 		std::string game = localGame;
 		localPending = false;
-		bool importing = importPending, localBanner = importBanner;
+		bool importing = importPending;
+		SwitchArtworkType localType = importType;
 		std::string localRom = importRom, localPath = importPath;
 		importPending = false;
 		unsigned restoreId = resetSerial;
@@ -533,6 +538,7 @@ void work(void*) {
 		Option selected = choose && chosen < options.size() ? options[chosen] : Option{};
 		if (search || choose) rom = choiceRom;
 		if (!search && !choose && rom.find(" [RHP ") != std::string::npos) exact = true;
+		bool box = search && choiceBox;
 		if (search) { cover = choiceCovers; banner = choiceBanners; }
 		searchPending = choosePending = false;
 		percent = 0; finished = false;
@@ -563,10 +569,10 @@ void work(void*) {
 			bool ok = revision == generation && running;
 			if (ok && clearGame) ok = clearGameArtwork(restoreRom);
 			else if (ok) {
-				std::string target = selectionPath(restoreRom, restoreBanner);
+				std::string target = selectionPath(restoreRom, restoreType);
 				ok = !remove((target + ".bak").c_str()) || errno == ENOENT;
 				if (ok) ok = !remove(target.c_str()) || errno == ENOENT;
-				if (ok) ok = revealArtwork(restoreRom, restoreBanner);
+				if (ok) ok = revealArtwork(restoreRom, restoreType);
 			}
 			if (revision == generation) ++imageRevision;
 			resetCompleted = restoreId;
@@ -579,7 +585,7 @@ void work(void*) {
 			continue;
 		}
 		if (importing) {
-			bool ok = importLocalImage(localRom, localPath, localBanner, revision);
+			bool ok = importLocalImage(localRom, localPath, localType, revision);
 			mutexLock(&lock);
 			if (revision == generation) { if (ok) ++imageRevision; finished = true; status = ok ? "Artwork imported" : "Import failed: choose a valid PNG, JPG or JPEG (up to 8 MiB)"; }
 			mutexUnlock(&lock);
@@ -612,17 +618,18 @@ void work(void*) {
 				if (file) fclose(file);
 			} else ok = fetch(selected.url, "", revision, 8 * 1024 * 1024, bytes);
 			if (ok && validImage(bytes)) {
-				std::string target = selectionPath(rom, selected.view.banner), temp = target + ".tmp";
+				std::string target = selectionPath(rom, selected.view.type), temp = target + ".tmp";
 				FILE* file = fopen(temp.c_str(), "wb");
 				ok = file && fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
 				if (file && fclose(file)) ok = false;
 				mutexLock(&lock); bool current = revision == generation && running; mutexUnlock(&lock);
-				ok = ok && current && replaceSelection(temp, target) && revealArtwork(rom, selected.view.banner); remove(temp.c_str());
+				ok = ok && current && replaceSelection(temp, target) && revealArtwork(rom, selected.view.type); remove(temp.c_str());
 			} else ok = false;
 			mutexLock(&lock); if (revision == generation) { if (ok) ++imageRevision; finished = true; status = ok ? "Artwork ready" : "Artwork download failed"; } mutexUnlock(&lock);
 			continue;
 		}
 		if (search && (source == SWITCH_ARTWORK_ROMHACKPLAZA || (source == SWITCH_ARTWORK_AUTO && token.empty()))) {
+			if (box) { mutexLock(&lock); if (revision == generation) { searching = false; finished = true; status = "Box art online search requires a SteamGridDB API key and database."; } mutexUnlock(&lock); continue; }
 			message("Searching Romhack Plaza main images...");
 			size_t count = 0;
 			SwitchPlazaArtworkOptions(query.c_str(), [revision, best, &count]() { return currentJob(revision) && (!best || !count); }, [&](const std::string& name, const std::vector<unsigned char>& image) {
@@ -639,7 +646,7 @@ void work(void*) {
 				ok = decoded != nullptr;
 				if (decoded) mImageDestroy(decoded);
 				if (!ok || !currentJob(revision)) { remove(path.c_str()); return; }
-				Option option{}; option.cached = true; option.view.banner = banner;
+				Option option{}; option.cached = true; option.view.banner = banner; option.view.type = banner ? SWITCH_ARTWORK_BANNER : SWITCH_ARTWORK_COVER;
 				snprintf(option.view.title, sizeof(option.view.title), "%s (main image)", name.c_str());
 				snprintf(option.view.preview, sizeof(option.view.preview), "%s", path.c_str());
 				mutexLock(&lock); bool current = revision == generation && running; if (current) options.push_back(option); mutexUnlock(&lock);
@@ -705,10 +712,10 @@ void work(void*) {
 			std::stable_sort(games.begin(), games.end(), [](const Game& a, const Game& b) { return a.score > b.score; });
 			size_t count = 0;
 			for (size_t g = 0; g < games.size() && g < 6 && count < 12 && (!best || !count); ++g) {
-				for (unsigned kind = 0; kind < 2 && count < 12 && (!best || !count); ++kind) {
-					if (kind ? !banner : !cover) continue;
+				for (unsigned kind = 0; kind < 3 && count < 12 && (!best || !count); ++kind) {
+					if (kind == SWITCH_ARTWORK_BOX ? !box : kind == SWITCH_ARTWORK_BANNER ? !banner : !cover) continue;
 					rapidjson::Document art;
-					std::string route = (kind ? "heroes/game/" : "grids/game/") + std::to_string(games[g].id) + (kind ? "?mimes=image/png&types=static" : "?dimensions=600x900&mimes=image/png&types=static");
+					std::string route = (kind == SWITCH_ARTWORK_BANNER ? "heroes/game/" : "grids/game/") + std::to_string(games[g].id) + (kind == SWITCH_ARTWORK_BANNER ? "?mimes=image/png&types=static" : kind == SWITCH_ARTWORK_BOX ? "?dimensions=512x512&mimes=image/png&types=static" : "?dimensions=600x900&mimes=image/png&types=static");
 					if (!json(route, token, revision, art)) continue;
 					unsigned perGame = 0;
 					for (const auto* entry : rankedArt(art)) {
@@ -719,8 +726,9 @@ void work(void*) {
 						if (url.find("https://cdn2.steamgriddb.com/") && url.find("https://cdn.steamgriddb.com/")) continue;
 						std::string bytes;
 						if (!fetch(url, "", revision, 8 * 1024 * 1024, bytes) || !validImage(bytes)) continue;
-						Option option{}; option.url = url; option.view.id = games[g].id; option.view.banner = kind;
-						snprintf(option.view.title, sizeof(option.view.title), "%s (%s)", games[g].title.c_str(), kind ? "Banner" : "Cover");
+						if (kind == SWITCH_ARTWORK_BOX && memcmp(bytes.data() + 16, bytes.data() + 20, 4)) continue;
+						Option option{}; option.url = url; option.view.id = games[g].id; option.view.banner = kind == SWITCH_ARTWORK_BANNER; option.view.type = static_cast<SwitchArtworkType>(kind);
+						snprintf(option.view.title, sizeof(option.view.title), "%s (%s)", games[g].title.c_str(), kind == SWITCH_ARTWORK_BOX ? "Box art" : kind == SWITCH_ARTWORK_BANNER ? "Banner" : "Cover");
 						std::string path = directory + "/choice-" + std::to_string(revision) + "-" + std::to_string(count) + ".png";
 						FILE* f = fopen(path.c_str(), "wb"); bool ok = f && fwrite(bytes.data(), 1, bytes.size(), f) == bytes.size(); if (f && fclose(f)) ok = false;
 						if (!ok) { remove(path.c_str()); continue; }
@@ -782,13 +790,15 @@ void SwitchArtworkGetState(SwitchArtworkState* state) {
 bool SwitchArtworkGetOption(size_t index, SwitchArtworkOption* option) {
 	if (!initialized || !option) return false; mutexLock(&lock); bool ok = index < options.size(); if (ok) *option = options[index].view; mutexUnlock(&lock); return ok;
 }
-bool SwitchArtworkOpen(const char* rom, bool banner) {
-	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
+bool SwitchArtworkOpen(const char* rom, bool banner) { return SwitchArtworkOpenType(rom, banner ? SWITCH_ARTWORK_BANNER : SWITCH_ARTWORK_COVER); }
+bool SwitchArtworkOpenType(const char* rom, SwitchArtworkType type) {
+	if (!initialized || !rom || !*rom || strlen(rom) >= 4096 || type < SWITCH_ARTWORK_COVER || type > SWITCH_ARTWORK_BOX) return false;
 	mutexLock(&lock);
 	searchBest = false;
 	choiceRom = requested = rom;
-	choiceCovers = !banner;
-	choiceBanners = banner;
+	choiceCovers = type == SWITCH_ARTWORK_COVER;
+	choiceBanners = type == SWITCH_ARTWORK_BANNER;
+	choiceBox = type == SWITCH_ARTWORK_BOX;
 	suspended = needsChoice = searching = searchPending = choosePending = testKey = false;
 	finished = false;
 	pending.clear();
@@ -848,30 +858,31 @@ void SwitchArtworkCancelLocal(void) {
 	if (localActive) { cancelBulkLocked(); ++generation; applying = false; finished = true; status = "Local artwork assignment cancelled"; condvarWakeAll(&changed); }
 	mutexUnlock(&lock);
 }
-bool SwitchArtworkImport(const char* rom, const char* path, bool banner) {
-	if (!initialized || !rom || !*rom || strlen(rom) >= 4096 || !path || !*path || strlen(path) >= 4096) return false;
+bool SwitchArtworkImport(const char* rom, const char* path, bool banner) { return SwitchArtworkImportType(rom, path, banner ? SWITCH_ARTWORK_BANNER : SWITCH_ARTWORK_COVER); }
+bool SwitchArtworkImportType(const char* rom, const char* path, SwitchArtworkType type) {
+	if (!initialized || !rom || !*rom || strlen(rom) >= 4096 || !path || !*path || strlen(path) >= 4096 || type < SWITCH_ARTWORK_COVER || type > SWITCH_ARTWORK_BOX) return false;
 	mutexLock(&lock);
 	if (applying || importPending || choosePending) { mutexUnlock(&lock); return false; }
-	importRom = choiceRom = requested = rom; importPath = path; importBanner = banner;
+	importRom = choiceRom = requested = rom; importPath = path; importType = type;
 	importPending = applying = true; finished = false; percent = 0;
 	searchPending = choosePending = searching = needsChoice = testKey = false; pending.clear();
-	status = banner ? "Importing banner..." : "Importing cover...";
+	status = type == SWITCH_ARTWORK_BOX ? "Importing box art..." : type == SWITCH_ARTWORK_BANNER ? "Importing banner..." : "Importing cover...";
 	cancelBulkLocked(); ++generation; condvarWakeAll(&changed); mutexUnlock(&lock);
 	return true;
 }
-static bool queueArtworkReset(const char* rom, bool banner, bool clear) {
+static bool queueArtworkReset(const char* rom, SwitchArtworkType type, bool clear) {
 	if (!initialized || !rom || !*rom || strlen(rom) >= 4096) return false;
 	mutexLock(&lock);
 	if (resetPending) { mutexUnlock(&lock); return false; }
 	resetRom = requested = rom;
-	resetBanner = banner;
+	resetType = type;
 	resetClearGame = clear;
 	resetPending = true;
 	++resetSerial;
 	needsChoice = searching = searchPending = choosePending = testKey = false;
 	finished = false;
 	percent = 0;
-	status = clear ? "Clearing game artwork..." : banner ? "Restoring original banner..." : "Restoring original cover...";
+	status = clear ? "Clearing game artwork..." : type == SWITCH_ARTWORK_BOX ? "Restoring original box art..." : type == SWITCH_ARTWORK_BANNER ? "Restoring original banner..." : "Restoring original cover...";
 	pending.clear();
 	discardOptions();
 	importPending = false; if (!busy) applying = false; cancelBulkLocked(); ++generation;
@@ -879,13 +890,14 @@ static bool queueArtworkReset(const char* rom, bool banner, bool clear) {
 	mutexUnlock(&lock);
 	return true;
 }
-bool SwitchArtworkReset(const char* rom, bool banner) { return queueArtworkReset(rom, banner, false); }
-bool SwitchArtworkClearGame(const char* rom) { return queueArtworkReset(rom, false, true); }
+bool SwitchArtworkReset(const char* rom, bool banner) { return SwitchArtworkResetType(rom, banner ? SWITCH_ARTWORK_BANNER : SWITCH_ARTWORK_COVER); }
+bool SwitchArtworkResetType(const char* rom, SwitchArtworkType type) { return type >= SWITCH_ARTWORK_COVER && type <= SWITCH_ARTWORK_BOX && queueArtworkReset(rom, type, false); }
+bool SwitchArtworkClearGame(const char* rom) { return queueArtworkReset(rom, SWITCH_ARTWORK_COVER, true); }
 void SwitchArtworkSearch(const char* title) {
 	if (!initialized || !title || !*title || strlen(title) > 512) return;
 	mutexLock(&lock);
 	bool plaza = choiceSource == SWITCH_ARTWORK_ROMHACKPLAZA || (choiceSource == SWITCH_ARTWORK_AUTO && key.empty());
-	bool available = plaza ? SwitchPlazaHasKey() : !key.empty();
+	bool available = choiceBox ? !plaza && !key.empty() : plaza ? SwitchPlazaHasKey() : !key.empty();
 	if (!choiceRom.empty() && available) {
 		searchBest = false;
 		searchTitle = title;
@@ -900,7 +912,7 @@ void SwitchArtworkSearch(const char* title) {
 		condvarWakeAll(&changed);
 	} else if (!available) {
 		finished = true;
-		status = plaza ? "Add a Romhack Plaza API key in Settings first." : "Add a SteamGridDB API key in Settings > Artwork to search.";
+		status = choiceBox ? "Box art online search requires a SteamGridDB API key and database." : plaza ? "Add a Romhack Plaza API key in Settings first." : "Add a SteamGridDB API key in Settings > Artwork to search.";
 	}
 	mutexUnlock(&lock);
 }
@@ -993,7 +1005,7 @@ bool SwitchArtworkDownloadBestFromSource(const char* rom, const char* title, Swi
 	if (!initialized || !rom || !title || !*title || strlen(title) > 512 || source < SWITCH_ARTWORK_AUTO || source > SWITCH_ARTWORK_ROMHACKPLAZA) return false;
 	mutexLock(&lock);
 	bool plaza = source == SWITCH_ARTWORK_ROMHACKPLAZA || (source == SWITCH_ARTWORK_AUTO && key.empty());
-	bool available = plaza ? SwitchPlazaHasKey() : !key.empty();
+	bool available = choiceBox ? !plaza && !key.empty() : plaza ? SwitchPlazaHasKey() : !key.empty();
 	bool ok = available && choiceRom == rom && !applying && !importPending && !choosePending;
 	if (ok) {
 		choiceSource = source; searchTitle = title; searchBest = searchPending = searching = true;
@@ -1001,7 +1013,7 @@ bool SwitchArtworkDownloadBestFromSource(const char* rom, const char* title, Swi
 		status = plaza ? "Finding the best Romhack Plaza main image..." : "Finding the best SteamGridDB artwork...";
 		cancelBulkLocked(); ++generation; condvarWakeAll(&changed);
 	} else if (!available) {
-		finished = true; status = plaza ? "Add a Romhack Plaza API key in Settings first." : "Add a SteamGridDB API key in Settings > Artwork first.";
+		finished = true; status = choiceBox ? "Box art online search requires a SteamGridDB API key and database." : plaza ? "Add a Romhack Plaza API key in Settings first." : "Add a SteamGridDB API key in Settings > Artwork first.";
 	}
 	mutexUnlock(&lock); return ok;
 }
@@ -1026,10 +1038,11 @@ void SwitchArtworkCancelBulk(void) {
 	if (bulk) { cancelBulkLocked(); ++generation; finished = true; status = "Missing artwork download cancelled"; condvarWakeAll(&changed); }
 	mutexUnlock(&lock);
 }
-bool SwitchArtworkPath(const char* rom, bool banner, char* out, size_t size) {
-	if (!rom || !out || !size) return false;
-	if (exists(emptyPath(rom, banner))) { out[0] = 0; return false; }
-	std::string selected = selectionPath(rom, banner);
+bool SwitchArtworkPath(const char* rom, bool banner, char* out, size_t size) { return SwitchArtworkPathType(rom, banner ? SWITCH_ARTWORK_BANNER : SWITCH_ARTWORK_COVER, out, size); }
+bool SwitchArtworkPathType(const char* rom, SwitchArtworkType type, char* out, size_t size) {
+	if (!rom || !out || !size || type < SWITCH_ARTWORK_COVER || type > SWITCH_ARTWORK_BOX) return false;
+	if (exists(emptyPath(rom, type))) { out[0] = 0; return false; }
+	std::string selected = selectionPath(rom, type);
 	if (!exists(selected) && exists(selected + ".bak")) selected += ".bak";
 	if (exists(selected) && selected.size() < size) {
 		memcpy(out, selected.c_str(), selected.size() + 1);
@@ -1038,8 +1051,8 @@ bool SwitchArtworkPath(const char* rom, bool banner, char* out, size_t size) {
 	std::string path = rom;
 	size_t slash = path.find_last_of("/\\"), dot = path.find_last_of('.');
 	if (dot != std::string::npos && (slash == std::string::npos || dot > slash)) path.resize(dot);
-	path += banner ? ".banner.png" : ".cover.png";
-	if (!exists(path)) path = cachePath(rom, banner);
+	path += type == SWITCH_ARTWORK_BOX ? ".boxart.png" : type == SWITCH_ARTWORK_BANNER ? ".banner.png" : ".cover.png";
+	if (!exists(path)) path = cachePath(rom, type);
 	if (!exists(path) || path.size() >= size) { out[0] = 0; return false; }
 	memcpy(out, path.c_str(), path.size() + 1); return true;
 }

@@ -3,6 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 #include "gui-images.h"
 #include "artwork.h"
+#include "game-settings.h"
 #include <mgba-util/image.h>
 #include <switch.h>
 #include <limits.h>
@@ -73,7 +74,12 @@ static void _work(void* unused) {
 		mutexUnlock(&_lock);
 		char path[PATH_MAX];
 		if (job.direct) job.image = _load(job.rom);
-		else if (SwitchArtworkPath(job.rom, job.banner, path, sizeof(path))) job.image = _load(path);
+		else {
+			struct SwitchGameSettings settings;
+			enum SwitchArtworkType type = job.banner ? SWITCH_ARTWORK_BANNER : SWITCH_ARTWORK_COVER;
+			if (!job.banner && SwitchGameSettingsLoad(job.rom, &settings) && settings.boxArt) type = SWITCH_ARTWORK_BOX;
+			if (SwitchArtworkPathType(job.rom, type, path, sizeof(path))) job.image = _load(path);
+		}
 		mutexLock(&_lock);
 		_active = false;
 		bool accepted = _running && job.generation == _generation;

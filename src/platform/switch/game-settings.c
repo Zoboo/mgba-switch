@@ -56,16 +56,29 @@ bool SwitchGameSettingsLoad(const char* rom, struct SwitchGameSettings* settings
 	memset(settings, 0, sizeof(*settings));
 	char path[PATH_MAX];
 	if (!_path(rom, path, sizeof(path), false)) return false;
-	struct stat st;
-	if (stat(path, &st)) return errno == ENOENT;
 	FILE* file = fopen(path, "rb");
-	if (!file) return false;
-	char header[32], storedRom[PATH_MAX];
-	bool ok = _readLine(file, header, sizeof(header)) && !strcmp(header, "mGBA Switch saves 1") &&
+	if (!file) {
+		if (errno != ENOENT) return false;
+		char backup[PATH_MAX];
+		if (snprintf(backup, sizeof(backup), "%s.previous", path) >= (int) sizeof(backup)) return false;
+		file = fopen(backup, "rb");
+		if (!file) {
+			if (errno != ENOENT) return false;
+			file = fopen(path, "rb");
+			if (!file) return errno == ENOENT;
+		}
+	}
+	char header[32], storedRom[PATH_MAX], display[2];
+	bool ok = _readLine(file, header, sizeof(header)) &&
+	          (!strcmp(header, "mGBA Switch saves 1") || !strcmp(header, "mGBA Switch saves 2")) &&
 	          _readLine(file, storedRom, sizeof(storedRom)) && !strcmp(storedRom, rom) &&
 	          _readLine(file, settings->directory, sizeof(settings->directory)) &&
-	          _readLine(file, settings->extension, sizeof(settings->extension)) &&
-	          fgetc(file) == EOF && !ferror(file) && _valid(settings);
+	          _readLine(file, settings->extension, sizeof(settings->extension));
+	if (ok && !strcmp(header, "mGBA Switch saves 2")) {
+		ok = _readLine(file, display, sizeof(display)) && (!strcmp(display, "0") || !strcmp(display, "1"));
+		if (ok) settings->boxArt = display[0] == '1';
+	}
+	ok = ok && fgetc(file) == EOF && !ferror(file) && _valid(settings);
 	if (fclose(file)) ok = false;
 	return ok;
 }
@@ -81,7 +94,7 @@ bool SwitchGameSettingsSave(const char* rom, const struct SwitchGameSettings* se
 	}
 	FILE* file = fopen(temporary, "wb");
 	if (!file) return false;
-	bool ok = fprintf(file, "mGBA Switch saves 1\n%s\n%s\n%s\n", rom, settings->directory, settings->extension) > 0;
+	bool ok = fprintf(file, "mGBA Switch saves 2\n%s\n%s\n%s\n%u\n", rom, settings->directory, settings->extension, settings->boxArt ? 1U : 0U) > 0;
 	if (fflush(file) || ferror(file)) ok = false;
 	if (fclose(file)) ok = false;
 	if (ok) {

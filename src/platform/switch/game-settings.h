@@ -10,6 +10,7 @@ struct mGUIRunner;
 struct SwitchGameSettings {
 	char directory[PATH_MAX];
 	char extension[16];
+	bool boxArt;
 };
 
 bool SwitchGameSettingsLoad(const char* rom, struct SwitchGameSettings* settings);

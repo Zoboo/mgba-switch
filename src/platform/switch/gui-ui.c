@@ -76,7 +76,8 @@ static size_t _pickerIndex;
 static char _pickerQuery[513];
 static int _pickerType = -1;
 static unsigned _resetWatch;
-static bool _resetBanner, _resetSuccess;
+static enum SwitchArtworkType _resetType;
+static bool _resetSuccess;
 static char _resetGame[513], _resetMessage[192], _resetNotice[600];
 static u64 _resetNoticeUntil;
 static bool _gameSettingsOpen;
@@ -585,7 +586,7 @@ static void _pickerEditSearch(struct GUIParams* params) {
 	swkbdClose(&keyboard);
 	if (accepted && title[strspn(title, " \t\r\n")]) {
 		strlcpy(_pickerQuery, title, sizeof(_pickerQuery));
-		SwitchArtworkOpen(_focusPath, _pickerType == 1);
+		SwitchArtworkOpenType(_focusPath, _pickerType);
 		_pickerPhase = 1;
 		_pickerIndex = 0;
 		SwitchImagesInvalidate();
@@ -593,9 +594,9 @@ static void _pickerEditSearch(struct GUIParams* params) {
 	GUIInvalidateKeys(params);
 }
 
-static void _pickerOpen(struct GUIParams* params, const char* rom, bool banner) {
+static void _pickerOpen(struct GUIParams* params, const char* rom, enum SwitchArtworkType type) {
 	if (!_pickerPhase) SwitchArtworkSetSource(SWITCH_ARTWORK_AUTO);
-	if (!SwitchArtworkOpen(rom, banner)) {
+	if (!SwitchArtworkOpenType(rom, type)) {
 		GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Artwork service unavailable.");
 		GUIInvalidateKeys(params);
 		return;
@@ -603,7 +604,7 @@ static void _pickerOpen(struct GUIParams* params, const char* rom, bool banner) 
 	if (strcmp(_focusPath, rom)) strlcpy(_focusPath, rom, sizeof(_focusPath));
 	_pickerPhase = 1;
 	_pickerIndex = 0;
-	_pickerType = banner ? 1 : 0;
+	_pickerType = type;
 	SwitchImagesInvalidate();
 	GUIInvalidateKeys(params);
 }
@@ -650,28 +651,30 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 		if (_gameSettingsPage == GAME_SETTINGS_MAIN) _gameSettingsOpen = false;
 		else if (_gameSettingsPage == GAME_SETTINGS_ARTWORK) { _gameSettingsPage = GAME_SETTINGS_MAIN; _gameSettingsIndex = 0; }
 		else if (_gameSettingsPage == GAME_SETTINGS_MANUAL) { _gameSettingsPage = GAME_SETTINGS_ARTWORK; _gameSettingsIndex = 1; }
-		else { _gameSettingsPage = GAME_SETTINGS_MANUAL; _gameSettingsIndex = _pickerType == 1; }
+		else { _gameSettingsPage = GAME_SETTINGS_MANUAL; _gameSettingsIndex = _pickerType == SWITCH_ARTWORK_BOX ? 1 : _pickerType == SWITCH_ARTWORK_BANNER ? 2 : 0; }
 		GUIInvalidateKeys(params);
 		return true;
 	}
-	unsigned count = _gameSettingsPage == GAME_SETTINGS_MAIN ? 4 : 2;
+	unsigned count = _gameSettingsPage == GAME_SETTINGS_MAIN ? 5 : _gameSettingsPage == GAME_SETTINGS_MANUAL ? 3 : 2;
 	if (input & (1U << GUI_INPUT_UP)) _gameSettingsIndex = (_gameSettingsIndex + count - 1) % count;
 	if (input & (1U << GUI_INPUT_DOWN)) _gameSettingsIndex = (_gameSettingsIndex + 1) % count;
 	bool activate = input & (1U << GUI_INPUT_SELECT);
-	if (tapped && _inside(x, y, 216, 220, 848, count * 66)) {
-		_gameSettingsIndex = (y - 220) / 66;
+	unsigned rowHeight = _gameSettingsPage == GAME_SETTINGS_MAIN ? 58 : 66;
+	if (tapped && _inside(x, y, 216, 220, 848, count * rowHeight)) {
+		_gameSettingsIndex = (y - 220) / rowHeight;
 		activate = true;
 	}
 	if (activate) {
 		if (_gameSettingsResetWatch) return true;
-		if (_gameSettingsPage != GAME_SETTINGS_MAIN || _gameSettingsIndex != 3) _gameSettingsResetMessage[0] = 0;
+		if (_gameSettingsPage != GAME_SETTINGS_MAIN || _gameSettingsIndex != 4) _gameSettingsResetMessage[0] = 0;
 		if (_gameSettingsPage == GAME_SETTINGS_ARTWORK) {
 			if (!_gameSettingsIndex) {
 				_gameSettingsLocalNotice = true;
 				_gameSettingsLocalError = !SwitchArtworkApplyLocalGame(_gameSettingsRom, false);
 			} else { _gameSettingsPage = GAME_SETTINGS_MANUAL; _gameSettingsIndex = 0; }
 		} else if (_gameSettingsPage == GAME_SETTINGS_MANUAL) {
-			_pickerType = _gameSettingsIndex == 1;
+			static const enum SwitchArtworkType types[] = { SWITCH_ARTWORK_COVER, SWITCH_ARTWORK_BOX, SWITCH_ARTWORK_BANNER };
+			_pickerType = types[_gameSettingsIndex];
 			_gameSettingsPage = GAME_SETTINGS_SOURCE;
 			_gameSettingsIndex = 0;
 		} else if (_gameSettingsPage == GAME_SETTINGS_SOURCE) {
@@ -680,14 +683,20 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 				strlcpy(_pickerQuery, title ? title + 1 : _gameSettingsRom, sizeof(_pickerQuery));
 				char* extension = strrchr(_pickerQuery, '.');
 				if (extension) *extension = 0;
-				_pickerOpen(params, _gameSettingsRom, _pickerType == 1);
+				_pickerOpen(params, _gameSettingsRom, _pickerType);
 			} else _importArtwork(params, _gameSettingsRom);
 		} else if (!_gameSettingsIndex) {
 			_gameSettingsPage = GAME_SETTINGS_ARTWORK;
 			_gameSettingsIndex = 0;
 		} else if (_gameSettingsIndex == 1) {
-			_gameSaveFolder(params);
+			struct SwitchGameSettings next = _gameSettings;
+			next.boxArt = !next.boxArt;
+			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) {
+				_gameSettings = next; SwitchImagesInvalidate(); _clearTextures();
+			} else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save artwork display preference.");
 		} else if (_gameSettingsIndex == 2) {
+			_gameSaveFolder(params);
+		} else if (_gameSettingsIndex == 3) {
 			const char* extensions[] = { "", ".sav", ".srm", ".dat" };
 			unsigned index = 0;
 			while (index < 3 && strcmp(_gameSettings.extension, extensions[index])) ++index;
@@ -695,9 +704,9 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 			strlcpy(next.extension, extensions[(index + 1) % 4], sizeof(next.extension));
 			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
 			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
-		} else if (_gameSettingsIndex == 3) {
+		} else if (_gameSettingsIndex == 4) {
 			if (GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
-			    "Restore Default Settings for %s? Saves will use .sav and the default save folder. Cover and banner will be empty. Existing save files and source images stay untouched.",
+			    "Restore Default Settings for %s? Saves will use .sav and the default save folder. Cover, box art and banner will be empty. Existing save files and source images stay untouched.",
 			    strrchr(_gameSettingsRom, '/') ? strrchr(_gameSettingsRom, '/') + 1 : _gameSettingsRom) == GUI_MENU_EXIT_ACCEPT) {
 				struct SwitchGameSettings next;
 				SwitchGameSettingsDefaults(&next);
@@ -738,26 +747,27 @@ static void _gameSettingsDraw(struct GUIParams* params) {
 	SwitchUIFontSize(params->font, 28);
 	const char* heading = _gameSettingsPage == GAME_SETTINGS_MAIN ? "Game Settings" :
 	    _gameSettingsPage == GAME_SETTINGS_ARTWORK ? "Change Artwork" :
-	    _gameSettingsPage == GAME_SETTINGS_MANUAL ? "Manually Assign" : _pickerType == 1 ? "Change Banner" : "Change Cover";
+	    _gameSettingsPage == GAME_SETTINGS_MANUAL ? "Manually Assign" : _pickerType == SWITCH_ARTWORK_BOX ? "Change Box Art" : _pickerType == SWITCH_ARTWORK_BANNER ? "Change Banner" : "Change Cover";
 	SwitchUIPrint(params->font, 216, 148, 848, UI_TEXT, heading);
 	const char* name = strrchr(_gameSettingsRom, '/');
 	SwitchUIFontSize(params->font, 20);
 	SwitchUIPrint(params->font, 216, 184, 848, UI_FOCUS, name ? name + 1 : _gameSettingsRom);
-	static const char* mainLabels[] = { "Change Artwork", "Save folder", "Save file extension (raw saves only)", "Restore Default Settings" };
+	static const char* mainLabels[] = { "Change Artwork", "Artwork Display", "Save folder", "Save file extension (raw saves only)", "Restore Default Settings" };
 	static const char* artworkLabels[] = { "Automatically Assign", "Manually Assign" };
-	static const char* manualLabels[] = { "Change Cover", "Change Banner" };
+	static const char* manualLabels[] = { "Change Cover", "Change Box Art", "Change Banner" };
 	static const char* sourceLabels[] = { "Browse Online", "Browse SD Card" };
 	const char* const* labels = _gameSettingsPage == GAME_SETTINGS_MAIN ? mainLabels :
 	    _gameSettingsPage == GAME_SETTINGS_ARTWORK ? artworkLabels : _gameSettingsPage == GAME_SETTINGS_MANUAL ? manualLabels : sourceLabels;
-	unsigned count = _gameSettingsPage == GAME_SETTINGS_MAIN ? 4 : 2;
+	unsigned count = _gameSettingsPage == GAME_SETTINGS_MAIN ? 5 : _gameSettingsPage == GAME_SETTINGS_MANUAL ? 3 : 2;
 	for (unsigned i = 0; i < count; ++i) {
-		int top = 220 + 66 * i;
-		if (_gameSettingsIndex == i) SwitchUIRoundFrame(212, top, 856, 60, 8, UI_FOCUS);
+		int top = 220 + (_gameSettingsPage == GAME_SETTINGS_MAIN ? 58 : 66) * i;
+		if (_gameSettingsIndex == i) SwitchUIRoundFrame(212, top, 856, _gameSettingsPage == GAME_SETTINGS_MAIN ? 52 : 60, 8, UI_FOCUS);
 		SwitchUIFontSize(params->font, 20);
 		SwitchUIPrint(params->font, 232, top + 25, 808, UI_TEXT, labels[i]);
 		const char* value = _gameSettingsPage != GAME_SETTINGS_MAIN ? NULL :
-		    i == 1 ? (_gameSettings.directory[0] ? _gameSettings.directory : "Default save folder") :
-		    i == 2 ? (_gameSettings.extension[0] ? _gameSettings.extension : "Default (.sav or configured player slot)") : NULL;
+		    i == 1 ? (_gameSettings.boxArt ? "Box Art" : "Cover Art") :
+	    i == 2 ? (_gameSettings.directory[0] ? _gameSettings.directory : "Default save folder") :
+		    i == 3 ? (_gameSettings.extension[0] ? _gameSettings.extension : "Default (.sav or configured player slot)") : NULL;
 		if (value) { SwitchUIFontSize(params->font, 16); SwitchUIPrint(params->font, 232, top + 48, 808, UI_MUTED, value); }
 	}
 	if (*_gameSettingsResetMessage && !strcmp(_gameSettingsResetRom, _gameSettingsRom)) {
@@ -835,7 +845,7 @@ static void _importArtwork(struct GUIParams* params, const char* rom) {
 			}
 			free(previous);
 		}
-		if (!SwitchArtworkImport(game, selected, _pickerType == 1))
+		if (!SwitchArtworkImportType(game, selected, _pickerType))
 			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not start image import. Please try again.");
 	}
 	GUIInvalidateKeys(params);
@@ -861,7 +871,7 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 		if (_pickerPhase == 3) {
 			if (back) _pickerPhase = 2;
 			else if (accept) {
-				if (SwitchArtworkReset(rom, _resetBanner)) {
+				if (SwitchArtworkResetType(rom, _resetType)) {
 					SwitchArtworkGetState(&status);
 					_resetWatch = status.resetId;
 					_pickerPhase = 4;
@@ -891,7 +901,7 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 			GUIInvalidateKeys(params);
 			return true;
 		}
-		_resetBanner = (buttons & HidNpadButton_R) || (tapped && x >= 420);
+		_resetType = (buttons & HidNpadButton_R) || (tapped && x >= 420) ? SWITCH_ARTWORK_BANNER : _pickerType == SWITCH_ARTWORK_BOX ? SWITCH_ARTWORK_BOX : SWITCH_ARTWORK_COVER;
 		const char* name = strrchr(rom, '/');
 		strlcpy(_resetGame, name ? name + 1 : rom, sizeof(_resetGame));
 		char* extension = strrchr(_resetGame, '.');
@@ -923,12 +933,16 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 		return true;
 	}
 	if (_pickerPhase == 2) {
-		if ((buttons & HidNpadButton_ZL) || (tapped && _inside(x, y, 830, 158, 158, 44))) {
-			_pickerOpen(params, rom, false);
+		if ((buttons & HidNpadButton_StickR) || (tapped && _inside(x, y, 940, 158, 100, 44))) {
+			_pickerOpen(params, rom, SWITCH_ARTWORK_BOX);
 			return true;
 		}
-		if ((buttons & HidNpadButton_ZR) || (tapped && _inside(x, y, 1002, 158, 158, 44))) {
-			_pickerOpen(params, rom, true);
+		if ((buttons & HidNpadButton_ZL) || (tapped && _inside(x, y, 830, 158, 100, 44))) {
+			_pickerOpen(params, rom, SWITCH_ARTWORK_COVER);
+			return true;
+		}
+		if ((buttons & HidNpadButton_ZR) || (tapped && _inside(x, y, 1050, 158, 110, 44))) {
+			_pickerOpen(params, rom, SWITCH_ARTWORK_BANNER);
 			return true;
 		}
 	}
@@ -986,7 +1000,7 @@ static void _resetDraw(struct GUIParams* params) {
 	SwitchUIFontSize(params->font, 28);
 	_wrapTitle(params->font, 144, 246, 976, _resetGame, 2, UI_TEXT);
 	SwitchUIFontSize(params->font, 22);
-	SwitchUIPrint(params->font, 144, 344, 976, UI_FOCUS, _resetBanner ? "Artwork type: Banner" : "Artwork type: Cover");
+	SwitchUIPrint(params->font, 144, 344, 976, UI_FOCUS, _resetType == SWITCH_ARTWORK_BOX ? "Artwork type: Box Art" : _resetType == SWITCH_ARTWORK_BANNER ? "Artwork type: Banner" : "Artwork type: Cover");
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIPrint(params->font, 144, 400, 976, UI_TEXT,
 	              _pickerPhase == 3 ? "Remove this replacement and restore the original artwork or fallback?" :
@@ -1015,7 +1029,7 @@ static void _pickerDraw(struct GUIParams* params) {
 		_resetWatch = 0;
 		strlcpy(_resetMessage, _resetSuccess ? "Original artwork or fallback restored." :
 		        "Could not remove the replacement. Check SD card access and try again.", sizeof(_resetMessage));
-		snprintf(_resetNotice, sizeof(_resetNotice), "%s reset %s: %s", _resetBanner ? "Banner" : "Cover",
+		snprintf(_resetNotice, sizeof(_resetNotice), "%s reset %s: %s", _resetType == SWITCH_ARTWORK_BOX ? "Box Art" : _resetType == SWITCH_ARTWORK_BANNER ? "Banner" : "Cover",
 		         _resetSuccess ? "succeeded" : "failed", _resetGame);
 		_resetNoticeUntil = armTicksToNs(armGetSystemTick()) + 4000000000ULL;
 		if (_pickerPhase == 4) _pickerPhase = 5;
@@ -1051,8 +1065,9 @@ static void _pickerDraw(struct GUIParams* params) {
 		SwitchUIFontSize(params->font, 16);
 		SwitchUIPrint(params->font, 120, 226, 1040, UI_MUTED, status.message);
 		_button(params->font, 600, 158, 220, "-  Download best", false);
-		_button(params->font, 830, 158, 158, "ZL  Cover", _pickerType == 0);
-		_button(params->font, 1002, 158, 158, "ZR  Banner", _pickerType == 1);
+		_button(params->font, 830, 158, 100, "ZL Cover", _pickerType == SWITCH_ARTWORK_COVER);
+		_button(params->font, 940, 158, 100, "R3 Box", _pickerType == SWITCH_ARTWORK_BOX);
+		_button(params->font, 1050, 158, 110, "ZR Banner", _pickerType == SWITCH_ARTWORK_BANNER);
 		size_t first = (_pickerIndex / 3) * 3;
 		for (size_t i = first; i < status.count && i < first + 3; ++i) {
 			struct SwitchArtworkOption option;
@@ -1074,7 +1089,7 @@ static void _pickerDraw(struct GUIParams* params) {
 			}
 			SwitchUIFontSize(params->font, 18);
 			SwitchUIPrint(params->font, x + 14, 495, 302, UI_TEXT, option.title);
-			SwitchUIPrint(params->font, x + 14, 525, 302, UI_MUTED, option.banner ? "Use as banner" : "Use as cover");
+			SwitchUIPrint(params->font, x + 14, 525, 302, UI_MUTED, option.type == SWITCH_ARTWORK_BOX ? "Use as box art" : option.type == SWITCH_ARTWORK_BANNER ? "Use as banner" : "Use as cover");
 		}
 		if (!status.count) {
 			SwitchUIFontSize(params->font, 20);
@@ -1084,7 +1099,7 @@ static void _pickerDraw(struct GUIParams* params) {
 			SwitchUIHint(params->font, 136, 624, "A", "Use selected artwork");
 			SwitchUIHint(params->font, 500, 624, "< >", "Browse");
 		}
-		_button(params->font, 120, 550, 280, "L  Reset cover", false);
+		_button(params->font, 120, 550, 280, _pickerType == SWITCH_ARTWORK_BOX ? "L  Reset box art" : "L  Reset cover", false);
 		_button(params->font, 420, 550, 300, "R  Reset banner", false);
 		_button(params->font, 740, 550, 420, "X  Import image from SD", false);
 	}
@@ -1096,7 +1111,7 @@ static void _pickerDraw(struct GUIParams* params) {
 static void _artworkDimensions(struct GUIParams* params) {
 	SwitchUIFontSize(params->font, 14);
 	SwitchUIPrint(params->font, 408, 650, 784, UI_MUTED,
-	              "Recommended: cover 600 x 900 px (2:3); banner 1280 x 720 px (16:9).");
+	              "Cover: 600 x 900 (2:3); box art: 512 x 512 (1:1); banner: 1280 x 720 (16:9) px.");
 	SwitchUIFontSize(params->font, 18);
 }
 
@@ -1133,7 +1148,7 @@ static bool _artworkPages(struct GUIParams* params, struct GUIMenu* menu, struct
 		if (menu->index == 2) SwitchArtworkCancelLocal();
 		else if (!progress.busy && !progress.bulk && !progress.applying && !progress.searching) {
 			bool accepted = menu->index || GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
-			    "Assign local covers and banners to all games? Existing artwork is replaced only when a local image matches.") == GUI_MENU_EXIT_ACCEPT;
+			    "Assign local covers, box art and banners to all games? Existing artwork is replaced only when a local image matches.") == GUI_MENU_EXIT_ACCEPT;
 			if (accepted) {
 				const char* roots[16];
 				size_t count = SwitchUIRomDirectoriesGet(&_runner->config, roots, 16);
@@ -1164,7 +1179,7 @@ static bool _artworkPages(struct GUIParams* params, struct GUIMenu* menu, struct
 		if (progress.local) _button(params->font, 408, 370, 784, "Cancel local assignment", menu->index == 2);
 		SwitchUIFontSize(params->font, 18);
 		SwitchUIPrint(params->font, 408, 450, 784, UI_MUTED, "Match image names to ROM titles. Ambiguous matches are skipped.");
-		SwitchUIPrint(params->font, 408, 484, 784, UI_MUTED, "Use Game.cover.png or Game.banner.jpg; PNG, JPG and JPEG work.");
+		SwitchUIPrint(params->font, 408, 484, 784, UI_MUTED, "Use Game.cover.png, Game.boxart.png or Game.banner.jpg.");
 		SwitchUIPrint(params->font, 408, 518, 784, UI_MUTED, "Scans every configured ROM folder. Per-game choices are in Game Settings.");
 		SwitchUIPrint(params->font, 408, 572, 784, UI_FOCUS, progress.message);
 		if (progress.local) {
@@ -1799,7 +1814,7 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		strlcpy(_pickerQuery, filename ? filename + 1 : selected->title, sizeof(_pickerQuery));
 		char* extension = strrchr(_pickerQuery, '.');
 		if (extension) *extension = 0;
-		_pickerOpen(params, rom, false);
+		_pickerOpen(params, rom, SWITCH_ARTWORK_COVER);
 		input = 0;
 	}
 	if (count && (input & (1U << GUI_INPUT_SELECT))) {
