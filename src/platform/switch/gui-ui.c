@@ -82,6 +82,9 @@ static u64 _resetNoticeUntil;
 static bool _gameSettingsOpen;
 static unsigned _plazaInstalled;
 static unsigned _gameSettingsIndex;
+enum GameSettingsPage { GAME_SETTINGS_MAIN, GAME_SETTINGS_ARTWORK, GAME_SETTINGS_MANUAL, GAME_SETTINGS_SOURCE };
+static enum GameSettingsPage _gameSettingsPage;
+static bool _gameSettingsLocalError;
 static bool _gameSettingsLocalNotice;
 static char _gameSettingsRom[PATH_MAX];
 static struct SwitchGameSettings _gameSettings;
@@ -580,11 +583,10 @@ static void _pickerEditSearch(struct GUIParams* params) {
 	swkbdClose(&keyboard);
 	if (accepted && title[strspn(title, " \t\r\n")]) {
 		strlcpy(_pickerQuery, title, sizeof(_pickerQuery));
-		if (_pickerPhase == 2) {
-			_pickerIndex = 0;
-			SwitchArtworkSearch(_pickerQuery);
-			SwitchImagesInvalidate();
-		}
+		SwitchArtworkOpen(_focusPath, _pickerType == 1);
+		_pickerPhase = 1;
+		_pickerIndex = 0;
+		SwitchImagesInvalidate();
 	}
 	GUIInvalidateKeys(params);
 }
@@ -597,42 +599,55 @@ static void _pickerOpen(struct GUIParams* params, const char* rom, bool banner) 
 		return;
 	}
 	if (strcmp(_focusPath, rom)) strlcpy(_focusPath, rom, sizeof(_focusPath));
-	_pickerPhase = 2;
+	_pickerPhase = 1;
 	_pickerIndex = 0;
 	_pickerType = banner ? 1 : 0;
-	SwitchArtworkSearch(_pickerQuery);
 	SwitchImagesInvalidate();
 	GUIInvalidateKeys(params);
 }
 
+static void _importArtwork(struct GUIParams* params, const char* rom);
+
 static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool tapped, unsigned x, unsigned y) {
 	if (!_gameSettingsOpen || _pickerPhase) return false;
 	if (input & ((1U << GUI_INPUT_BACK) | (1U << GUI_INPUT_CANCEL))) {
-		_gameSettingsOpen = false;
+		if (_gameSettingsPage == GAME_SETTINGS_MAIN) _gameSettingsOpen = false;
+		else if (_gameSettingsPage == GAME_SETTINGS_ARTWORK) { _gameSettingsPage = GAME_SETTINGS_MAIN; _gameSettingsIndex = 0; }
+		else if (_gameSettingsPage == GAME_SETTINGS_MANUAL) { _gameSettingsPage = GAME_SETTINGS_ARTWORK; _gameSettingsIndex = 1; }
+		else { _gameSettingsPage = GAME_SETTINGS_MANUAL; _gameSettingsIndex = _pickerType == 1; }
 		GUIInvalidateKeys(params);
 		return true;
 	}
-	if (input & (1U << GUI_INPUT_UP)) _gameSettingsIndex = (_gameSettingsIndex + 5) % 6;
-	if (input & (1U << GUI_INPUT_DOWN)) _gameSettingsIndex = (_gameSettingsIndex + 1) % 6;
+	unsigned count = _gameSettingsPage == GAME_SETTINGS_MAIN ? 4 : 2;
+	if (input & (1U << GUI_INPUT_UP)) _gameSettingsIndex = (_gameSettingsIndex + count - 1) % count;
+	if (input & (1U << GUI_INPUT_DOWN)) _gameSettingsIndex = (_gameSettingsIndex + 1) % count;
 	bool activate = input & (1U << GUI_INPUT_SELECT);
-	if (tapped && _inside(x, y, 216, 220, 848, 324)) {
-		_gameSettingsIndex = (y - 220) / 54;
+	if (tapped && _inside(x, y, 216, 220, 848, count * 66)) {
+		_gameSettingsIndex = (y - 220) / 66;
 		activate = true;
 	}
 	if (activate) {
-		if (_gameSettingsIndex < 2) {
-			const char* title = strrchr(_gameSettingsRom, '/');
-			strlcpy(_pickerQuery, title ? title + 1 : _gameSettingsRom, sizeof(_pickerQuery));
-			char* extension = strrchr(_pickerQuery, '.');
-			if (extension) *extension = 0;
-			_pickerOpen(params, _gameSettingsRom, _gameSettingsIndex == 1);
-		} else if (_gameSettingsIndex == 2) {
-			if (GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK | GUI_MESSAGE_BOX_CANCEL, 0,
-			    "Assign matching local covers and banners to this game? Existing matched artwork will be replaced.") == GUI_MENU_EXIT_ACCEPT) {
-				_gameSettingsLocalNotice = SwitchArtworkApplyLocalGame(_gameSettingsRom, false);
-				if (!_gameSettingsLocalNotice) GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Another artwork task is active. Wait or cancel it in Artwork settings.");
-			}
-		} else if (_gameSettingsIndex == 3) {
+		if (_gameSettingsPage == GAME_SETTINGS_ARTWORK) {
+			if (!_gameSettingsIndex) {
+				_gameSettingsLocalNotice = true;
+				_gameSettingsLocalError = !SwitchArtworkApplyLocalGame(_gameSettingsRom, false);
+			} else { _gameSettingsPage = GAME_SETTINGS_MANUAL; _gameSettingsIndex = 0; }
+		} else if (_gameSettingsPage == GAME_SETTINGS_MANUAL) {
+			_pickerType = _gameSettingsIndex == 1;
+			_gameSettingsPage = GAME_SETTINGS_SOURCE;
+			_gameSettingsIndex = 0;
+		} else if (_gameSettingsPage == GAME_SETTINGS_SOURCE) {
+			if (!_gameSettingsIndex) {
+				const char* title = strrchr(_gameSettingsRom, '/');
+				strlcpy(_pickerQuery, title ? title + 1 : _gameSettingsRom, sizeof(_pickerQuery));
+				char* extension = strrchr(_pickerQuery, '.');
+				if (extension) *extension = 0;
+				_pickerOpen(params, _gameSettingsRom, _pickerType == 1);
+			} else _importArtwork(params, _gameSettingsRom);
+		} else if (!_gameSettingsIndex) {
+			_gameSettingsPage = GAME_SETTINGS_ARTWORK;
+			_gameSettingsIndex = 0;
+		} else if (_gameSettingsIndex == 1) {
 			SwkbdConfig keyboard;
 			if (R_SUCCEEDED(swkbdCreate(&keyboard, 0))) {
 				swkbdConfigMakePresetDefault(&keyboard);
@@ -647,7 +662,7 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 					else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save settings. Choose an existing writable sdmc:/ folder.");
 				}
 			}
-		} else if (_gameSettingsIndex == 4) {
+		} else if (_gameSettingsIndex == 2) {
 			const char* extensions[] = { "", ".sav", ".srm", ".dat" };
 			unsigned index = 0;
 			while (index < 3 && strcmp(_gameSettings.extension, extensions[index])) ++index;
@@ -655,7 +670,7 @@ static bool _gameSettingsInput(struct GUIParams* params, uint32_t input, bool ta
 			strlcpy(next.extension, extensions[(index + 1) % 4], sizeof(next.extension));
 			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
 			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
-		} else if (_gameSettingsIndex == 5) {
+		} else if (_gameSettingsIndex == 3) {
 			struct SwitchGameSettings next = { 0 };
 			if (SwitchGameSettingsSave(_gameSettingsRom, &next)) _gameSettings = next;
 			else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not save game settings.");
@@ -670,30 +685,43 @@ static void _gameSettingsDraw(struct GUIParams* params) {
 	SwitchUIDrawRect(0, 0, 1280, 720, 0xD9000000);
 	SwitchUIRoundRect(184, 100, 912, 528, 16, UI_BASE);
 	SwitchUIFontSize(params->font, 28);
-	SwitchUIPrint(params->font, 216, 148, 848, UI_TEXT, "Game settings");
+	const char* heading = _gameSettingsPage == GAME_SETTINGS_MAIN ? "Game Settings" :
+	    _gameSettingsPage == GAME_SETTINGS_ARTWORK ? "Change Artwork" :
+	    _gameSettingsPage == GAME_SETTINGS_MANUAL ? "Manually Assign" : _pickerType == 1 ? "Change Banner" : "Change Cover";
+	SwitchUIPrint(params->font, 216, 148, 848, UI_TEXT, heading);
 	const char* name = strrchr(_gameSettingsRom, '/');
 	SwitchUIFontSize(params->font, 20);
 	SwitchUIPrint(params->font, 216, 184, 848, UI_FOCUS, name ? name + 1 : _gameSettingsRom);
-	const char* labels[] = { "Change cover", "Change banner", "Assign local artwork", "Save folder", "Save file extension (raw saves only)", "Restore default save settings" };
-	for (unsigned i = 0; i < 6; ++i) {
-		int top = 220 + 54 * i;
-		if (_gameSettingsIndex == i) SwitchUIRoundFrame(212, top, 856, 48, 8, UI_FOCUS);
+	static const char* mainLabels[] = { "Change Artwork", "Save folder", "Save file extension (raw saves only)", "Restore default save settings" };
+	static const char* artworkLabels[] = { "Automatically Assign", "Manually Assign" };
+	static const char* manualLabels[] = { "Change Cover", "Change Banner" };
+	static const char* sourceLabels[] = { "Browse Online", "Browse SD Card" };
+	const char* const* labels = _gameSettingsPage == GAME_SETTINGS_MAIN ? mainLabels :
+	    _gameSettingsPage == GAME_SETTINGS_ARTWORK ? artworkLabels : _gameSettingsPage == GAME_SETTINGS_MANUAL ? manualLabels : sourceLabels;
+	unsigned count = _gameSettingsPage == GAME_SETTINGS_MAIN ? 4 : 2;
+	for (unsigned i = 0; i < count; ++i) {
+		int top = 220 + 66 * i;
+		if (_gameSettingsIndex == i) SwitchUIRoundFrame(212, top, 856, 60, 8, UI_FOCUS);
 		SwitchUIFontSize(params->font, 20);
 		SwitchUIPrint(params->font, 232, top + 25, 808, UI_TEXT, labels[i]);
-		const char* value = i == 3 ? (_gameSettings.directory[0] ? _gameSettings.directory : "Default save folder") :
-		                    i == 4 ? (_gameSettings.extension[0] ? _gameSettings.extension : "Default (.sav or configured player slot)") : NULL;
+		const char* value = _gameSettingsPage != GAME_SETTINGS_MAIN ? NULL :
+		    i == 1 ? (_gameSettings.directory[0] ? _gameSettings.directory : "Default save folder") :
+		    i == 2 ? (_gameSettings.extension[0] ? _gameSettings.extension : "Default (.sav or configured player slot)") : NULL;
 		if (value) { SwitchUIFontSize(params->font, 16); SwitchUIPrint(params->font, 232, top + 48, 808, UI_MUTED, value); }
 	}
 	if (_gameSettingsLocalNotice) {
 		struct SwitchArtworkState local;
 		SwitchArtworkGetState(&local);
 		SwitchUIFontSize(params->font, 16);
-		SwitchUIPrint(params->font, 216, 562, 848, UI_FOCUS, local.message);
+		SwitchUIPrint(params->font, 216, 542, 848, UI_FOCUS, _gameSettingsLocalError ? "Another artwork task is active. Wait or cancel it in Artwork settings." : local.message);
 	}
 	SwitchUIFontSize(params->font, 18);
-	SwitchUIPrint(params->font, 216, 580, 848, UI_MUTED, "Save changes apply next launch. Existing save files are not moved or converted.");
+	SwitchUIPrint(params->font, 216, 580, 848, UI_MUTED, _gameSettingsPage == GAME_SETTINGS_MAIN ?
+	    "Save changes apply next launch. Existing save files are not moved or converted." :
+	    _gameSettingsPage == GAME_SETTINGS_ARTWORK ? "Automatic matching uses local images in /mGBA/artwork." :
+	    _gameSettingsPage == GAME_SETTINGS_SOURCE ? "Online images are fetched only when you select Search." : "Choose the artwork type to change.");
 	SwitchUIHint(params->font, 216, 612, "B", "Back");
-	SwitchUIHint(params->font, 880, 612, "A", "Change");
+	SwitchUIHint(params->font, 880, 612, "A", "Select");
 	SwitchUIFontSize(params->font, 24);
 }
 
@@ -703,13 +731,32 @@ static bool _artworkImageFile(const char* name) {
 }
 
 static void _importArtwork(struct GUIParams* params, const char* rom) {
-	char currentPath[PATH_MAX], selected[PATH_MAX], game[PATH_MAX];
+	char currentPath[PATH_MAX], selected[PATH_MAX], game[PATH_MAX], start[PATH_MAX];
 	strlcpy(currentPath, params->currentPath, sizeof(currentPath));
 	strlcpy(game, rom, sizeof(game));
+	mCoreConfigDirectory(start, sizeof(start));
+	strlcat(start, "/artwork", sizeof(start));
+	if (start[0] == '/') {
+		char relative[PATH_MAX]; strlcpy(relative, start, sizeof(relative));
+		snprintf(start, sizeof(start), "sdmc:%s", relative);
+	}
+	const char* saved = mCoreConfigGetValue(&_runner->config, "switch.artwork.importDirectory");
+	if (saved && !strpbrk(saved, "\r\n") && strlen(saved) < sizeof(start) &&
+	    (saved[0] == '/' || !strncmp(saved, "sdmc:/", 6))) {
+		char path[PATH_MAX];
+		if (saved[0] == '/') snprintf(path, sizeof(path), "sdmc:%s", saved);
+		else strlcpy(path, saved, sizeof(path));
+		struct VDir* dir = VDirOpen(path);
+		if (dir) { dir->close(dir); strlcpy(start, path, sizeof(start)); }
+	}
+	struct VDir* dir = VDirOpen(start);
+	if (dir) dir->close(dir);
+	else strlcpy(start, "sdmc:/mGBA/artwork", sizeof(start));
+	mkdir(start, 0777);
 	const char* basePath = params->basePath;
 	size_t fileIndex = params->fileIndex;
 	params->basePath = "sdmc:/";
-	strlcpy(params->currentPath, "sdmc:/", sizeof(params->currentPath));
+	strlcpy(params->currentPath, start, sizeof(params->currentPath));
 	params->fileIndex = 0;
 	_importingArtwork = true;
 	GUIInvalidateKeys(params);
@@ -718,8 +765,25 @@ static void _importArtwork(struct GUIParams* params, const char* rom) {
 	params->basePath = basePath;
 	params->fileIndex = fileIndex;
 	strlcpy(params->currentPath, currentPath, sizeof(params->currentPath));
-	if (accepted && !SwitchArtworkImport(game, selected, _pickerType == 1))
-		GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not start image import. Please try again.");
+	if (accepted) {
+		char* slash = strrchr(selected, '/');
+		if (slash) {
+			char folder[PATH_MAX]; strlcpy(folder, selected, sizeof(folder));
+			folder[slash - selected + (slash == selected + 5)] = 0;
+			const char* old = mCoreConfigGetValue(&_runner->config, "switch.artwork.importDirectory");
+			char* previous = old ? strdup(old) : NULL;
+			if (!old || previous) {
+				mCoreConfigSetValue(&_runner->config, "switch.artwork.importDirectory", folder);
+				if (!mCoreConfigSave(&_runner->config)) {
+					mCoreConfigSetValue(&_runner->config, "switch.artwork.importDirectory", previous);
+					GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not remember the artwork folder. The image can still be imported.");
+				}
+			}
+			free(previous);
+		}
+		if (!SwitchArtworkImport(game, selected, _pickerType == 1))
+			GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not start image import. Please try again.");
+	}
 	GUIInvalidateKeys(params);
 }
 
@@ -760,7 +824,7 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 	if ((buttons & HidNpadButton_StickL) || (tapped && _inside(x, y, 120, 158, 460, 44))) {
 		SwitchArtworkSetSource((SwitchArtworkGetSource() + 1) % 3);
 		_pickerIndex = 0;
-		if (_pickerPhase == 2) SwitchArtworkSearch(_pickerQuery);
+		_pickerPhase = 1;
 		SwitchImagesInvalidate();
 		GUIInvalidateKeys(params);
 		return true;
@@ -784,6 +848,13 @@ static bool _pickerInput(struct GUIParams* params, const char* rom, uint32_t inp
 	}
 	if ((buttons & HidNpadButton_Y) || (tapped && _inside(x, y, 600, 104, 560, 48))) {
 		_pickerEditSearch(params);
+		return true;
+	}
+	if ((buttons & HidNpadButton_Plus) || (tapped && _inside(x, y, 430, 104, 150, 44))) {
+		SwitchArtworkSearch(_pickerQuery);
+		_pickerIndex = 0;
+		_pickerPhase = 2;
+		GUIInvalidateKeys(params);
 		return true;
 	}
 	if (_pickerPhase == 2 && ((buttons & HidNpadButton_Minus) || (tapped && _inside(x, y, 600, 158, 220, 44)))) {
@@ -906,21 +977,22 @@ static void _pickerDraw(struct GUIParams* params) {
 	SwitchUIRoundRect(96, 92, 1088, 552, 16, UI_BASE);
 	SwitchUIRoundFrame(96, 92, 1088, 552, 16, UI_FOCUS);
 	SwitchUIFontSize(params->font, 28);
-	SwitchUIPrint(params->font, 120, 138, 460, UI_TEXT, _pickerPhase == 1 ? "Find alternative artwork?" : "Choose artwork");
+	SwitchUIPrint(params->font, 120, 138, 300, UI_TEXT, _pickerPhase == 1 ? "Browse Online" : "Choose artwork");
+	_button(params->font, 430, 104, 150, "+  Search", false);
 	SwitchUIFontSize(params->font, 18);
 	SwitchUIRoundRect(600, 104, 560, 48, 8, UI_SURFACE);
 	SwitchUIRoundFrame(600, 104, 560, 48, 8, UI_FOCUS);
 	char search[560];
-	snprintf(search, sizeof(search), "Y  Search: %s", _pickerQuery);
+	snprintf(search, sizeof(search), "Y  Title: %s", _pickerQuery);
 	SwitchUIPrint(params->font, 616, 135, 528, UI_TEXT, search);
 	const char* databases[] = { "Auto", "SteamGridDB", "Romhack Plaza" };
 	char database[80];
 	snprintf(database, sizeof(database), "L3  Database: %s", databases[SwitchArtworkGetSource()]);
 	_button(params->font, 120, 158, 460, database, false);
 	if (_pickerPhase == 1) {
-		SwitchUIPrint(params->font, 120, 256, 1016, UI_TEXT, "No automatic artwork match was found for this game.");
-		SwitchUIPrint(params->font, 120, 296, 1016, UI_MUTED, "Choose a database, edit the title, and preview alternatives before applying.");
-		SwitchUIHint(params->font, 136, 612, "A", "Search database");
+		SwitchUIPrint(params->font, 120, 256, 1016, UI_TEXT, "Choose a database and title, then select Search to fetch artwork.");
+		SwitchUIPrint(params->font, 120, 296, 1016, UI_MUTED, "No online search starts automatically. Results and previews load asynchronously.");
+		_button(params->font, 120, 570, 650, "A  Search", true);
 	} else {
 		SwitchUIFontSize(params->font, 16);
 		SwitchUIPrint(params->font, 120, 226, 1040, UI_MUTED, status.message);
@@ -1650,7 +1722,8 @@ bool SwitchUILibraryMenu(struct GUIParams* params, struct GUIMenu* menu, struct 
 		if (SwitchGameSettingsLoad(_gameSettingsRom, &_gameSettings)) {
 			_gameSettingsOpen = true;
 			_gameSettingsIndex = 0;
-			_gameSettingsLocalNotice = false;
+			_gameSettingsPage = GAME_SETTINGS_MAIN;
+			_gameSettingsLocalNotice = _gameSettingsLocalError = false;
 		} else GUIShowMessageBox(params, GUI_MESSAGE_BOX_OK, 0, "Could not read game settings. Check SD card access.");
 		GUIInvalidateKeys(params);
 		input = 0;
